@@ -74,6 +74,8 @@ function App() {
       y: pos.y,
       type: selectedTool,
       fill: `hsl(${Math.random() * 360}, 70%, 50%)`,
+      locked: false,
+      lockedBy: null,
     };
     
     setShapes([...shapes, newShape]);
@@ -89,6 +91,23 @@ function App() {
     setShapes([]);
     sendMessage({ type: 'CLEAR_ALL' });
   };
+
+  const handleDragMove = (e, shape) => {
+    const updatedShape = {
+      ...shape,
+      x: e.target.x(),
+      y: e.target.y(),
+      locked: true,
+      lockedBy: 'currectUser', // Replace with actual user identifier
+    };
+        
+    setShapes(prev => 
+      prev.map(s => s.id === shape.id ? updatedShape : s)
+    );
+    console.log('updatedShape', updatedShape.x, updatedShape.y);
+    sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
+  };
+  
   const handleDragEnd = (e, shape) => {
     const updatedShape = {
       ...shape,
@@ -109,6 +128,7 @@ function App() {
       y: shape.y,
       fill: shape.fill,
       draggable: true,
+      onDragMove: (e) => handleDragMove(e, shape),
       onDragEnd: (e) => handleDragEnd(e, shape),
       onDblClick: () => handleDelete(shape.id),
     };

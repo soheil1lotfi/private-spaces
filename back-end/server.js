@@ -27,7 +27,7 @@ wss.on("connection", (ws) => {
 
   ws.on("message", (message) => {
     const data = JSON.parse(message);
-
+    // if (data.shape.lock === true) return;
     switch (data.type) {
       case "ADD_SHAPE":
         shapes.push(data.shape);
