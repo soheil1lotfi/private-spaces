@@ -206,9 +206,9 @@ body {
 }
 
 .private-button {
-  background: #e8f5e9;
-  color: #2e7d32;
-  border-color: #c8e6c9;
+  background: #ffebee;
+  color: #c62828;
+  border-color: #ffcdd2;
 }
 
 .private-button:hover {
@@ -216,9 +216,9 @@ body {
 }
 
 .private-button.active {
-  background: #ffebee;
-  color: #c62828;
-  border-color: #ffcdd2;
+  background: #e8f5e9;
+  color: #2e7d32;
+  border-color: #c8e6c9;
 }
 
 .private-button.active:hover {
@@ -228,34 +228,45 @@ body {
 /* Private Mode Banner */
 .private-banner {
   position: fixed;
-  top: 90px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 100;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+  pointer-events: none;
+  border: 8px solid #c62828;
+  box-sizing: border-box;
+}
+
+.private-banner-label {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 1001;
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 8px 16px;
-  background: #ffebee;
-  color: #c62828;
-  border-radius: 6px;
-  border: 1px solid #ffcdd2;
+  background: #c62828;
+  color: white;
+  border-radius: 4px;
   font-size: 13px;
-  font-weight: 500;
+  font-weight: 600;
 }
 
 .banner-close {
   background: none;
   border: none;
-  color: #c62828;
+  color: white;
   font-size: 18px;
   cursor: pointer;
   padding: 0 0 0 8px;
   line-height: 1;
+  pointer-events: all;
 }
 
 .banner-close:hover {
-  color: #b71c1c;
+  opacity: 0.8;
 }
 
 /* Shape Counter */

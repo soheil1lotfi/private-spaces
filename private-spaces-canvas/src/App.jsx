@@ -367,25 +367,21 @@ function App() {
             onClick={handlePrivateModeToggle}
             title={isPrivateMode ? 'Disable private mode' : 'Enable private mode'}
           >
-            {isPrivateMode ? <LockIcon /> : <UnlockIcon />}
-            <span>{isPrivateMode ? 'Private' : 'Public'}</span>
+            {isPrivateMode ? <UnlockIcon /> : <LockIcon />}
+            <span>{isPrivateMode ? 'Share' : 'Go Private'}</span>
           </button>
         </div>
       </div>
 
-      {/* Private Mode Banner */}
-      {isPrivateMode && showPrivateBanner && (
-        <div className="private-banner">
-          <LockIcon />
-          <span>Private mode enabled, your changes are not being shared</span>
-          <button
-            className="banner-close"
-            onClick={() => setShowPrivateBanner(false)}
-            title="Dismiss"
-          >
-            ×
-          </button>
-        </div>
+      {/* Private Mode Banner - Red Border */}
+      {isPrivateMode && (
+        <>
+          <div className="private-banner" />
+          <div className="private-banner-label">
+            <LockIcon />
+            <span>Private Mode</span>
+          </div>
+        </>
       )}
 
       {/* Shape Counter */}
