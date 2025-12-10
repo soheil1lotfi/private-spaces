@@ -2,12 +2,24 @@ const express = require("express");
 const cors = require("cors");
 const http = require("http");
 const { WebSocketServer } = require("ws");
-
+const mongoose = require("mongoose");
+const Shape = require("./models/shapes");
 const app = express();
 app.use(cors());
 app.use(express.json());
-
+const dbURI =
+  "mongodb+srv://<db_username>:<db_password>@cscw.93kngev.mongodb.net/?appName=CSCW";
 const server = http.createServer(app);
+mongoose
+  .connect(dbURI)
+  .then(() => {
+    server.listen(3001, () => {
+      console.log("Server running on http://localhost:3001");
+    });
+  })
+  .catch((err) => {
+    console.error("MongoDB connection error:", err);
+  });
 
 const wss = new WebSocketServer({ server });
 
@@ -31,6 +43,16 @@ wss.on("connection", (ws) => {
     switch (data.type) {
       case "ADD_SHAPE":
         shapes.push(data.shape);
+        new Shape({
+          id: data.shape.id,
+          x: data.shape.x,
+          y: data.shape.y,
+          type: data.shape.type,
+          fill: data.shape.fill,
+          isPrivate: data.shape.isPrivate,
+          isLocked: data.shape.isLocked,
+        }).save();
+
         broadcastExcept(ws, {
           type: "SHAPE_ADDED",
           shape: data.shape,
@@ -83,7 +105,3 @@ function broadcastExcept(excludeWs, data) {
     }
   });
 }
-
-server.listen(3001, () => {
-  console.log("Server running on http://localhost:3001");
-});

@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 import { Stage, Layer, Rect, Circle, Star } from 'react-konva';
-import { v4 as uuidv4 } from 'uuid' ;
 
 // Icon components 
 const CircleIcon = () => (
@@ -134,13 +133,12 @@ function App() {
     const pos = stage.getPointerPosition();
 
     const newShape = {
-      id: uuidv4(),
+      id: Date.now(),
       x: pos.x,
       y: pos.y,
       type: selectedTool,
       fill: selectedColor,
       isPrivate: isPrivateMode,
-      isLocked: false,
     };
 
     if (isPrivateMode) {
@@ -176,27 +174,6 @@ function App() {
     }
   };
 
-  const handleDragMove = (e, shape) => {
-    const updatedShape = {
-      ...shape,
-      x: e.target.x(),
-      y: e.target.y(),
-    };
-
-    if (shape.isPrivate) {
-      setPrivateShapes(prev =>
-        prev.map(s => s.id === shape.id ? updatedShape : s)
-      );
-    } else {
-      setShapes(prev =>
-        prev.map(s => s.id === shape.id ? updatedShape : s)
-      );
-      // TODO
-      shape.isLocked = true;
-      sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
-    }
-  };
-
   const handleDragEnd = (e, shape) => {
     const updatedShape = {
       ...shape,
@@ -221,17 +198,8 @@ function App() {
       setShowPrivateConfirmation(true);
     } else {
       setIsPrivateMode(false);
-      let tempShapes = privateShapes;
-      setPrivateShapes([]);
-      tempShapes.forEach(shape => {
-        shape.isPrivate = false;
-        console.log(shape)
-        sendMessage({ type: 'ADD_SHAPE', shape });
-      })
-      //this mf was inside the loop so it would add the whole temp list to the shapes and would cause the number of shapes to multiply exponentially 
-      setShapes(prev => [...prev, ...tempShapes]);
+    }
   };
-}
 
   const confirmPrivateMode = () => {
     setIsPrivateMode(true);
@@ -246,9 +214,6 @@ function App() {
       y: shape.y,
       fill: shape.fill,
       draggable: true,
-      onDragMove: (e) => {
-        handleDragMove(e, shape);
-      },
       onDragEnd: (e) => handleDragEnd(e, shape),
       onDblClick: () => handleDelete(shape.id, shape.isPrivate),
       // Add dashed stroke for private shapes to visually distinguish them
@@ -270,11 +235,7 @@ function App() {
   };
 
   // Combine shared and private shapes for rendering
-  let allShapes = [...shapes, ...privateShapes];
-
-  console.log('All Shapes:', allShapes);
-  console.log('Shapes:', shapes);
-  console.log(' Private shapes:', privateShapes );
+  const allShapes = [...shapes, ...privateShapes];
 
   const tools = [
     { id: 'circle', icon: <CircleIcon />, label: 'Circle' },
