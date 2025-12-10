@@ -419,3 +419,25 @@ body {
     display: none;
   }
 }
+
+/* User Cursors */
+.user-cursor {
+  position: fixed;
+  pointer-events: none;
+  z-index: 1000;
+  transform: translate(-2px, -2px);
+  transition: left 0.05s linear, top 0.05s linear;
+}
+
+.cursor-nickname {
+  display: inline-block;
+  margin-left: 16px;
+  margin-top: -4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: white;
+  white-space: nowrap;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+}

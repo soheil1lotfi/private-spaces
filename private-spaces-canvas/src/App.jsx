@@ -49,6 +49,26 @@ const colorPalette = [
   '#DDA0DD', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E9',
 ];
 
+// Cursor colors for users
+const cursorColors = [
+  '#FF6B6B', '#4ECDC4', '#45B7D1', '#FF8C42', '#A855F7',
+  '#EC4899', '#10B981', '#F59E0B', '#6366F1', '#84CC16',
+];
+
+// Random nickname generator
+const adjectives = ['Happy', 'Swift', 'Clever', 'Brave', 'Calm', 'Witty', 'Bold', 'Wise', 'Kind', 'Cool'];
+const animals = ['Panda', 'Fox', 'Owl', 'Tiger', 'Bear', 'Wolf', 'Eagle', 'Dolphin', 'Koala', 'Lynx'];
+
+const generateNickname = () => {
+  const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
+  const animal = animals[Math.floor(Math.random() * animals.length)];
+  return `${adj}${animal}`;
+};
+
+const generateUserColor = () => {
+  return cursorColors[Math.floor(Math.random() * cursorColors.length)];
+};
+
 // localStorage key for private shapes
 const PRIVATE_SHAPES_KEY = 'private-spaces-private-shapes';
 
@@ -66,7 +86,15 @@ function App() {
   const [showPrivateBanner, setShowPrivateBanner] = useState(true);
   const [showPrivateConfirmation, setShowPrivateConfirmation] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
+  const [cursors, setCursors] = useState({}); // { oderId: { id, nickname, color, x, y } }
   const wsRef = useRef(null);
+
+  // Generate user identity once on mount
+  const userRef = useRef({
+    id: uuidv4(),
+    nickname: generateNickname(),
+    color: generateUserColor(),
+  });
 
   // Save private shapes to localStorage whenever they change
   useEffect(() => {
@@ -80,6 +108,11 @@ function App() {
     ws.onopen = () => {
       console.log('Connected to server');
       setIsConnected(true);
+      // Send user identity to server
+      ws.send(JSON.stringify({
+        type: 'USER_JOIN',
+        user: userRef.current,
+      }));
     };
 
     ws.onmessage = (event) => {
@@ -88,6 +121,40 @@ function App() {
       switch (data.type) {
         case 'INIT':
           setShapes(data.shapes);
+          // Initialize cursors from existing users
+          if (data.users) {
+            const initialCursors = {};
+            data.users.forEach(user => {
+              initialCursors[user.id] = user;
+            });
+            setCursors(initialCursors);
+          }
+          break;
+
+        case 'USER_JOINED':
+          setCursors(prev => ({
+            ...prev,
+            [data.user.id]: data.user,
+          }));
+          break;
+
+        case 'USER_LEFT':
+          setCursors(prev => {
+            const next = { ...prev };
+            delete next[data.userId];
+            return next;
+          });
+          break;
+
+        case 'CURSOR_UPDATE':
+          setCursors(prev => ({
+            ...prev,
+            [data.userId]: {
+              ...prev[data.userId],
+              x: data.x,
+              y: data.y,
+            },
+          }));
           break;
 
         case 'SHAPE_ADDED':
@@ -119,6 +186,29 @@ function App() {
     };
 
     return () => ws.close();
+  }, []);
+
+  // Track mouse movement and send cursor updates (throttled)
+  useEffect(() => {
+    let lastSent = 0;
+    const throttleMs = 50; // Send at most every 50ms
+
+    const handleMouseMove = (e) => {
+      const now = Date.now();
+      if (now - lastSent < throttleMs) return;
+      lastSent = now;
+
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'CURSOR_MOVE',
+          x: e.clientX,
+          y: e.clientY,
+        }));
+      }
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    return () => window.removeEventListener('mousemove', handleMouseMove);
   }, []);
 
   const sendMessage = (data) => {
@@ -434,6 +524,35 @@ function App() {
           {allShapes.map(renderShape)}
         </Layer>
       </Stage>
+
+      {/* Other users' cursors */}
+      {Object.values(cursors).map(cursor => (
+        <div
+          key={cursor.id}
+          className="user-cursor"
+          style={{
+            left: cursor.x,
+            top: cursor.y,
+            '--cursor-color': cursor.color,
+          }}
+        >
+          <svg
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            fill={cursor.color}
+            style={{ filter: 'drop-shadow(1px 1px 1px rgba(0,0,0,0.3))' }}
+          >
+            <path d="M5.5 3.21V20.8c0 .45.54.67.85.35l4.86-4.86a.5.5 0 0 1 .35-.15h6.87c.48 0 .72-.58.38-.92L6.35 2.85a.5.5 0 0 0-.85.36Z" />
+          </svg>
+          <span
+            className="cursor-nickname"
+            style={{ backgroundColor: cursor.color }}
+          >
+            {cursor.nickname}
+          </span>
+        </div>
+      ))}
     </div>
   );
 }
