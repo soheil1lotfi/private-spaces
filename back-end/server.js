@@ -24,23 +24,58 @@ mongoose
 const wss = new WebSocketServer({ server });
 
 let shapes = [];
-const clients = new Set();
+const clients = new Map(); // Map<ws, { id, nickname, color, x, y }>
 
 wss.on("connection", (ws) => {
   console.log("New client connected");
-  clients.add(ws);
-
-  ws.send(
-    JSON.stringify({
-      type: "INIT",
-      shapes: shapes,
-    })
-  );
 
   ws.on("message", (message) => {
     const data = JSON.parse(message);
 
     switch (data.type) {
+      case "USER_JOIN":
+        // Register user with their identity
+        clients.set(ws, {
+          id: data.user.id,
+          nickname: data.user.nickname,
+          color: data.user.color,
+          x: 0,
+          y: 0,
+        });
+        console.log(`User joined: ${data.user.nickname}`);
+
+        // Send current shapes and all other users to the new client
+        ws.send(
+          JSON.stringify({
+            type: "INIT",
+            shapes: shapes,
+            users: Array.from(clients.values()).filter(
+              (u) => u.id !== data.user.id
+            ),
+          })
+        );
+
+        // Notify other clients about the new user
+        broadcastExcept(ws, {
+          type: "USER_JOINED",
+          user: clients.get(ws),
+        });
+        break;
+
+      case "CURSOR_MOVE":
+        const user = clients.get(ws);
+        if (user) {
+          user.x = data.x;
+          user.y = data.y;
+          broadcastExcept(ws, {
+            type: "CURSOR_UPDATE",
+            userId: user.id,
+            x: data.x,
+            y: data.y,
+          });
+        }
+        break;
+
       case "ADD_SHAPE":
         shapes.push(data.shape);
         new Shape({
@@ -83,25 +118,32 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    console.log("Client disconnected");
+    const user = clients.get(ws);
+    if (user) {
+      console.log(`User left: ${user.nickname}`);
+      broadcastExcept(ws, {
+        type: "USER_LEFT",
+        userId: user.id,
+      });
+    }
     clients.delete(ws);
   });
 });
 
 function broadcast(data) {
   const message = JSON.stringify(data);
-  clients.forEach((client) => {
-    if (client.readyState === 1) {
-      client.send(message);
+  clients.forEach((userData, ws) => {
+    if (ws.readyState === 1) {
+      ws.send(message);
     }
   });
 }
 
 function broadcastExcept(excludeWs, data) {
   const message = JSON.stringify(data);
-  clients.forEach((client) => {
-    if (client !== excludeWs && client.readyState === 1) {
-      client.send(message);
+  clients.forEach((userData, ws) => {
+    if (ws !== excludeWs && ws.readyState === 1) {
+      ws.send(message);
     }
   });
 }
