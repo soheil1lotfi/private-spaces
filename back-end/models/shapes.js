@@ -31,6 +31,10 @@ const shapeSchema = new Schema(
       type: Boolean,
       required: true,
     },
+    lockedBy: {
+      type: String,
+      default: null,
+    },
   },
   { timestamps: true }
 );

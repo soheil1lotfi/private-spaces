@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 import { Stage, Layer, Rect, Circle, Star } from 'react-konva';
+import { v4 as uuidv4 } from 'uuid';
 
 // Icon components 
 const CircleIcon = () => (
@@ -87,6 +88,9 @@ function App() {
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [cursors, setCursors] = useState({}); // { oderId: { id, nickname, color, x, y } }
   const wsRef = useRef(null);
+
+  const lastShapeUpdateRef = useRef(0);
+  const SHAPE_THROTTLE_MS = 100; 
 
   // Generate user identity once on mount
   const userRef = useRef({
@@ -190,11 +194,12 @@ function App() {
   // Track mouse movement and send cursor updates (throttled)
   useEffect(() => {
     let lastSent = 0;
-    const throttleMs = 50; // Send at most every 50ms
 
     const handleMouseMove = (e) => {
       const now = Date.now();
-      if (now - lastSent < throttleMs) return;
+      if (now - lastSent < SHAPE_THROTTLE_MS
+        
+      ) return;
       lastSent = now;
 
       if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -223,12 +228,13 @@ function App() {
     const pos = stage.getPointerPosition();
 
     const newShape = {
-      id: Date.now(),
+      id: uuidv4(),
       x: pos.x,
       y: pos.y,
       type: selectedTool,
       fill: selectedColor,
       isPrivate: isPrivateMode,
+      isLocked: false,
     };
 
     if (isPrivateMode) {
@@ -281,6 +287,45 @@ function App() {
       );
       sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
     }
+    if (!shape.isPrivate) {
+        sendMessage({ type: 'UNLOCK_REQUEST', shapeId: shape.id });
+    }
+  };
+
+  const handleDragMove = (e, shape) => {
+    const updatedShape = {
+      ...shape,
+      x: e.target.x(),
+      y: e.target.y(),
+    };
+
+    if (shape.isPrivate) {
+      setPrivateShapes(prev =>
+        prev.map(s => s.id === shape.id ? updatedShape : s)
+      );
+    } else {
+      setShapes(prev =>
+        prev.map(s => s.id === shape.id ? updatedShape : s)
+      );
+      // sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
+              // NEW: Throttle network updates
+      const now = Date.now();
+      if (now - lastShapeUpdateRef.current >= SHAPE_THROTTLE_MS) {
+          lastShapeUpdateRef.current = now;
+          sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
+      }
+    }
+  };
+
+  const handleDragStart = (e, shape) => {
+    if (shape.isLocked && shape.lockedBy !== userRef.current.id) {
+        e.target.stopDrag();
+        return;
+    }
+    
+    if (!shape.isPrivate) {
+        sendMessage({ type: 'LOCK_REQUEST', shapeId: shape.id });
+    }
   };
 
   const handlePrivateModeToggle = () => {
@@ -298,12 +343,18 @@ function App() {
   };
 
   const renderShape = (shape) => {
+    const isLockedByOther = shape.isLocked && shape.lockedBy !== userRef.current.id;
+
     const props = {
       key: shape.id,
       x: shape.x,
       y: shape.y,
       fill: shape.fill,
-      draggable: true,
+      draggable: !isLockedByOther,
+      onDragStart: (e) => handleDragStart(e, shape),
+      //remember to delete later
+      opacity: isLockedByOther ? 0.6 : 1,
+      onDragMove: (e) => handleDragMove(e, shape),
       onDragEnd: (e) => handleDragEnd(e, shape),
       onDblClick: () => handleDelete(shape.id, shape.isPrivate),
       // Add dashed stroke for private shapes to visually distinguish them

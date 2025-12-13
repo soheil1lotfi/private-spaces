@@ -4,11 +4,14 @@ const http = require("http");
 const { WebSocketServer } = require("ws");
 const mongoose = require("mongoose");
 const Shape = require("./models/shapes");
+
 const app = express();
+
 app.use(cors());
 app.use(express.json());
+
 const dbURI =
-  "mongodb+srv://<db_username>:<db_password>@cscw.93kngev.mongodb.net/?appName=CSCW";
+  "mongodb+srv://soheil1lotfi:soloLotfi@cscw.93kngev.mongodb.net/?appName=CSCW";
 const server = http.createServer(app);
 mongoose
   .connect(dbURI)
@@ -29,7 +32,7 @@ const clients = new Map(); // Map<ws, { id, nickname, color, x, y }>
 wss.on("connection", (ws) => {
   console.log("New client connected");
 
-  ws.on("message", (message) => {
+  ws.on("message", async (message) => {
     const data = JSON.parse(message);
 
     switch (data.type) {
@@ -44,11 +47,13 @@ wss.on("connection", (ws) => {
         });
         console.log(`User joined: ${data.user.nickname}`);
 
+        const dbShapes = await Shape.find();
+
         // Send current shapes and all other users to the new client
         ws.send(
           JSON.stringify({
             type: "INIT",
-            shapes: shapes,
+            shapes: dbShapes,
             users: Array.from(clients.values()).filter(
               (u) => u.id !== data.user.id
             ),
@@ -95,6 +100,18 @@ wss.on("connection", (ws) => {
         break;
 
       case "UPDATE_SHAPE":
+        await Shape.findOneAndUpdate(
+          { id: data.shape.id },
+          {
+            x: data.shape.x,
+            y: data.shape.y,
+            type: data.shape.type,
+            fill: data.shape.fill,
+            isPrivate: data.shape.isPrivate,
+            isLocked: data.shape.isLocked,
+          }
+        );
+
         shapes = shapes.map((s) => (s.id === data.shape.id ? data.shape : s));
         broadcastExcept(ws, {
           type: "SHAPE_UPDATED",
@@ -103,6 +120,8 @@ wss.on("connection", (ws) => {
         break;
 
       case "DELETE_SHAPE":
+        await Shape.deleteOne({ id: data.id });
+
         shapes = shapes.filter((s) => s.id !== data.id);
         broadcastExcept(ws, {
           type: "SHAPE_DELETED",
@@ -111,8 +130,57 @@ wss.on("connection", (ws) => {
         break;
 
       case "CLEAR_ALL":
+        await Shape.deleteMany({});
+
         shapes = [];
         broadcast({ type: "ALL_CLEARED" });
+        break;
+
+      case "LOCK_REQUEST":
+        const shapeToLock = shapes.find((s) => s.id === data.shapeId);
+        const requestingUser = clients.get(ws);
+
+        if (
+          shapeToLock.isLocked &&
+          shapeToLock.lockedBy !== requestingUser.id
+        ) {
+          ws.send(
+            JSON.stringify({
+              type: "LOCK_DENIED",
+              shapeId: data.shapeId,
+            })
+          );
+        } else {
+          shapeToLock.isLocked = true;
+          shapeToLock.lockedBy = requestingUser.id;
+
+          ws.send(
+            JSON.stringify({
+              type: "LOCK_GRANTED",
+              shapeId: data.shapeId,
+            })
+          );
+
+          broadcastExcept(ws, {
+            type: "SHAPE_UPDATED",
+            shape: shapeToLock,
+          });
+        }
+        break;
+
+      case "UNLOCK_REQUEST":
+        const shapeToUnlock = shapes.find((s) => s.id === data.shapeId);
+        const unlockingUser = clients.get(ws);
+
+        if (shapeToUnlock && shapeToUnlock.lockedBy === unlockingUser.id) {
+          shapeToUnlock.isLocked = false;
+          shapeToUnlock.lockedBy = null;
+
+          broadcast({
+            type: "SHAPE_UPDATED",
+            shape: shapeToUnlock,
+          });
+        }
         break;
     }
   });
@@ -120,6 +188,13 @@ wss.on("connection", (ws) => {
   ws.on("close", () => {
     const user = clients.get(ws);
     if (user) {
+      shapes.forEach((shape) => {
+        if (shape.lockedBy === user.id) {
+          shape.isLocked = false;
+          shape.lockedBy = null;
+          broadcast({ type: "SHAPE_UPDATED", shape });
+        }
+      });
       console.log(`User left: ${user.nickname}`);
       broadcastExcept(ws, {
         type: "USER_LEFT",
