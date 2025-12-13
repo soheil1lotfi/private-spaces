@@ -27,7 +27,7 @@ mongoose
 const wss = new WebSocketServer({ server });
 
 let shapes = [];
-const clients = new Map(); // Map<ws, { id, nickname, color, x, y }>
+const clients = new Map(); // Map<ws, { id, nickname, color, x, y, isPrivateMode }
 
 wss.on("connection", (ws) => {
   console.log("New client connected");
@@ -44,12 +44,22 @@ wss.on("connection", (ws) => {
           color: data.user.color,
           x: 0,
           y: 0,
+          isPrivateMode: false,
         });
         console.log(`User joined: ${data.user.nickname}`);
 
         const dbShapes = await Shape.find();
+        console.log(
+          `User joined: ${data.user.nickname} with color: ${data.user.color}`
+        );
 
-        // Send current shapes and all other users to the new client
+        const dbShapes = await Shape.find();
+        console.log(
+          `User joined: ${data.user.nickname} with color: ${data.user.color}`
+        );
+
+        // Send current shapes and ALL users (including this new user) to the new client
+        const allUsers = Array.from(clients.values());
         ws.send(
           JSON.stringify({
             type: "INIT",
@@ -179,6 +189,23 @@ wss.on("connection", (ws) => {
           broadcast({
             type: "SHAPE_UPDATED",
             shape: shapeToUnlock,
+          });
+        }
+        break;
+
+      case "PRIVATE_MODE_CHANGED":
+        const userPrivate = clients.get(ws);
+        if (userPrivate) {
+          userPrivate.isPrivateMode = data.isPrivateMode;
+          console.log(
+            `User ${userPrivate.nickname} private mode: ${data.isPrivateMode}`
+          );
+
+          // Broadcast private mode change to all other clients
+          broadcastExcept(ws, {
+            type: "PRIVATE_MODE_CHANGED",
+            userId: userPrivate.id,
+            isPrivateMode: data.isPrivateMode,
           });
         }
         break;

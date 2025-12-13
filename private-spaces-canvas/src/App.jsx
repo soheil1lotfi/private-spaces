@@ -86,8 +86,9 @@ function App() {
   const [showPrivateBanner, setShowPrivateBanner] = useState(true);
   const [showPrivateConfirmation, setShowPrivateConfirmation] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
-  const [cursors, setCursors] = useState({}); // { oderId: { id, nickname, color, x, y } }
+  const [cursors, setCursors] = useState({}); // { userId: { id, nickname, color, x, y } }
   const [selectedShapeId, setSelectedShapeId] = useState(null);
+  const [onlineUsers, setOnlineUsers] = useState([]);
   const wsRef = useRef(null);
 
   const lastShapeUpdateRef = useRef(0);
@@ -125,13 +126,14 @@ function App() {
       switch (data.type) {
         case 'INIT':
           setShapes(data.shapes);
-          // Initialize cursors from existing users
+          // Initialize cursors and online users from existing users
           if (data.users) {
             const initialCursors = {};
             data.users.forEach(user => {
               initialCursors[user.id] = user;
             });
             setCursors(initialCursors);
+            setOnlineUsers(data.users);
           }
           break;
 
@@ -140,6 +142,10 @@ function App() {
             ...prev,
             [data.user.id]: data.user,
           }));
+          setOnlineUsers(prev => {
+            if (prev.find(u => u.id === data.user.id)) return prev;
+            return [...prev, data.user];
+          });
           break;
 
         case 'USER_LEFT':
@@ -148,6 +154,7 @@ function App() {
             delete next[data.userId];
             return next;
           });
+          setOnlineUsers(prev => prev.filter(u => u.id !== data.userId));
           break;
 
         case 'CURSOR_UPDATE':
@@ -181,6 +188,35 @@ function App() {
         case 'ALL_CLEARED':
           setShapes([]);
           break;
+
+        case 'PRIVATE_MODE_CHANGED':
+          // Update online users to reflect private mode status
+          setOnlineUsers(prev => {
+            const updated = prev.map(u => u.id === data.userId ? { ...u, isPrivateMode: data.isPrivateMode } : u);
+            
+            // If user left private mode, restore their cursor
+            if (!data.isPrivateMode) {
+              const user = updated.find(u => u.id === data.userId);
+              if (user) {
+                setCursors(prevCursors => ({
+                  ...prevCursors,
+                  [user.id]: user,
+                }));
+              }
+            }
+            
+            return updated;
+          });
+          
+          // If user entered private mode, remove their cursor
+          if (data.isPrivateMode) {
+            setCursors(prev => {
+              const next = { ...prev };
+              delete next[data.userId];
+              return next;
+            });
+          }
+          break;
       }
     };
 
@@ -197,6 +233,9 @@ function App() {
     let lastSent = 0;
 
     const handleMouseMove = (e) => {
+      // Don't send cursor position if in private mode
+      if (isPrivateMode) return;
+
       const now = Date.now();
       if (now - lastSent < SHAPE_THROTTLE_MS
         
@@ -214,7 +253,7 @@ function App() {
 
     window.addEventListener('mousemove', handleMouseMove);
     return () => window.removeEventListener('mousemove', handleMouseMove);
-  }, []);
+  }, [isPrivateMode]);
 
   const sendMessage = (data) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -337,6 +376,15 @@ function App() {
     } else {
       const sharedShapes = privateShapes.map(s => ({ ...s, isPrivate: false }));
       setShapes(prev => [...prev, ...sharedShapes]);
+      setIsPrivateMode(false);
+      // Clear the cursor from other screens when leaving private mode
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'PRIVATE_MODE_CHANGED',
+          isPrivateMode: false,
+        }));
+      }
+      let tempShapes = privateShapes;
       setPrivateShapes([]);
       sharedShapes.forEach(shape => {
         sendMessage({ type: 'ADD_SHAPE', shape });
@@ -349,6 +397,13 @@ function App() {
     setIsPrivateMode(true);
     setShowPrivateBanner(true);
     setShowPrivateConfirmation(false);
+    // Notify server that user entered private mode
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        type: 'PRIVATE_MODE_CHANGED',
+        isPrivateMode: true,
+      }));
+    }
   };
 
   const renderShape = (shape) => {
@@ -548,33 +603,32 @@ function App() {
       </Stage>
 
       {/* Other users' cursors */}
-      {Object.values(cursors).map(cursor => (
-        <div
-          key={cursor.id}
-          className="user-cursor"
-          style={{
-            left: cursor.x,
-            top: cursor.y,
-            '--cursor-color': cursor.color,
-          }}
-        >
-          <svg
-            width="24"
-            height="24"
-            viewBox="0 0 24 24"
-            fill={cursor.color}
-            style={{ filter: 'drop-shadow(1px 1px 1px rgba(0,0,0,0.3))' }}
+      {Object.values(cursors).map(cursor => {
+        // Don't show the current user's own cursor
+        if (cursor.id === userRef.current.id) return null;
+        
+        return (
+          <div
+            key={cursor.id}
+            className="user-cursor"
+            style={{
+              left: cursor.x,
+              top: cursor.y,
+              '--cursor-color': cursor.color,
+            }}
           >
-            <path d="M5.5 3.21V20.8c0 .45.54.67.85.35l4.86-4.86a.5.5 0 0 1 .35-.15h6.87c.48 0 .72-.58.38-.92L6.35 2.85a.5.5 0 0 0-.85.36Z" />
-          </svg>
-          <span
-            className="cursor-nickname"
-            style={{ backgroundColor: cursor.color }}
-          >
-            {cursor.nickname}
-          </span>
-        </div>
-      ))}
+            <div className="cursor-plus" style={{ color: cursor.color }}>
+              +
+            </div>
+            <span
+              className="cursor-nickname"
+              style={{ backgroundColor: cursor.color }}
+            >
+              {cursor.nickname}
+            </span>
+          </div>
+        );
+      })}
 
       {/* Delete button for selected shape */}
       {selectedShapeId && (() => {
@@ -600,6 +654,29 @@ function App() {
           );
         }
       })()}
+
+      {/* User Presence Panel */}
+      <div className="user-presence-panel">
+        <div className="presence-header">
+          <span className="presence-title">Online ({onlineUsers.length})</span>
+        </div>
+        <div className="presence-list">
+          {onlineUsers.map(user => (
+            <div key={user.id} className={`presence-item ${user.isPrivateMode ? 'private-mode' : ''}`}>
+              <div 
+                className={`user-avatar ${user.isPrivateMode ? 'private-avatar' : ''}`}
+                style={{ backgroundColor: user.color }}
+                title={user.nickname}
+              >
+                {user.isPrivateMode ? '🔒' : user.nickname.charAt(0).toUpperCase()}
+              </div>
+              <span className="user-nickname">{user.nickname}</span>
+              {user.id === userRef.current.id && <span className="user-label">(You)</span>}
+              {user.isPrivateMode && <span className="user-label private">Private</span>}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
