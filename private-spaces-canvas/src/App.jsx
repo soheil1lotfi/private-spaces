@@ -335,6 +335,12 @@ function App() {
     if (!isPrivateMode) {
       setShowPrivateConfirmation(true);
     } else {
+      const sharedShapes = privateShapes.map(s => ({ ...s, isPrivate: false }));
+      setShapes(prev => [...prev, ...sharedShapes]);
+      setPrivateShapes([]);
+      sharedShapes.forEach(shape => {
+        sendMessage({ type: 'ADD_SHAPE', shape });
+      });
       setIsPrivateMode(false);
     }
   };
@@ -362,9 +368,9 @@ function App() {
       onClick: () => setSelectedShapeId(shape.id),
       onDblClick: () => setSelectedShapeId(shape.id),
       // Add dashed stroke for private shapes to visually distinguish them
-      stroke: isSelected ? '#FF1493' : (shape.isPrivate ? '#999' : undefined),
-      strokeWidth: isSelected ? 3 : (shape.isPrivate ? 2 : 0),
-      dash: isSelected ? [8, 4] : (shape.isPrivate ? [5, 5] : undefined),
+      stroke: shape.isPrivate ? '#FF1493' : undefined,
+      strokeWidth: shape.isPrivate ? 3 : 0,
+      dash: shape.isPrivate ? [8, 4] : undefined,
     };
 
     switch (shape.type) {
