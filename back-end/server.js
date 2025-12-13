@@ -53,11 +53,6 @@ wss.on("connection", (ws) => {
           `User joined: ${data.user.nickname} with color: ${data.user.color}`
         );
 
-        const dbShapes = await Shape.find();
-        console.log(
-          `User joined: ${data.user.nickname} with color: ${data.user.color}`
-        );
-
         // Send current shapes and ALL users (including this new user) to the new client
         const allUsers = Array.from(clients.values());
         ws.send(
