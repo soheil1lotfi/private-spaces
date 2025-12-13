@@ -205,6 +205,17 @@ body {
   cursor: not-allowed;
 }
 
+.delete-button {
+  background: #ff6b6b;
+  color: white;
+  border-color: #ff5252;
+}
+
+.delete-button:hover {
+  background: #ff5252;
+  border-color: #ff3838;
+}
+
 .private-button {
   background: #ffebee;
   color: #c62828;
@@ -384,6 +395,38 @@ body {
 
 .modal-button.confirm:hover {
   background: #b71c1c;
+}
+
+/* Delete button for selected shape */
+.shape-delete-button {
+  position: fixed;
+  z-index: 999;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #ff4444;
+  border: 2px solid white;
+  color: white;
+  font-size: 24px;
+  font-weight: bold;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  line-height: 1;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+  transition: all 0.2s ease;
+}
+
+.shape-delete-button:hover {
+  background: #ff2222;
+  transform: scale(1.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.shape-delete-button:active {
+  transform: scale(0.95);
 }
 
 /* Responsive adjustments */

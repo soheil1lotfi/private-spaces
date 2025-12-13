@@ -87,6 +87,7 @@ function App() {
   const [showPrivateConfirmation, setShowPrivateConfirmation] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [cursors, setCursors] = useState({}); // { oderId: { id, nickname, color, x, y } }
+  const [selectedShapeId, setSelectedShapeId] = useState(null);
   const wsRef = useRef(null);
 
   const lastShapeUpdateRef = useRef(0);
@@ -224,6 +225,8 @@ function App() {
   const handleClick = (e) => {
     if (e.target !== e.target.getStage()) return;
 
+    setSelectedShapeId(null);
+
     const stage = e.target.getStage();
     const pos = stage.getPointerPosition();
 
@@ -356,11 +359,12 @@ function App() {
       opacity: isLockedByOther ? 0.6 : 1,
       onDragMove: (e) => handleDragMove(e, shape),
       onDragEnd: (e) => handleDragEnd(e, shape),
-      onDblClick: () => handleDelete(shape.id, shape.isPrivate),
+      onClick: () => setSelectedShapeId(shape.id),
+      onDblClick: () => setSelectedShapeId(shape.id),
       // Add dashed stroke for private shapes to visually distinguish them
-      stroke: shape.isPrivate ? '#999' : undefined,
-      strokeWidth: shape.isPrivate ? 2 : 0,
-      dash: shape.isPrivate ? [5, 5] : undefined,
+      stroke: isSelected ? '#FF1493' : (shape.isPrivate ? '#999' : undefined),
+      strokeWidth: isSelected ? 3 : (shape.isPrivate ? 2 : 0),
+      dash: isSelected ? [8, 4] : (shape.isPrivate ? [5, 5] : undefined),
     };
 
     switch (shape.type) {
@@ -493,7 +497,7 @@ function App() {
 
       {/* Help Tooltip */}
       <div className="help-tooltip">
-        <span>Click to add • Drag to move • Double-click to delete</span>
+        <span>Click to add • Drag to move • Click shape to select • Delete when selected</span>
       </div>
 
       {/* Private Mode Confirmation Modal */}
@@ -565,6 +569,31 @@ function App() {
           </span>
         </div>
       ))}
+
+      {/* Delete button for selected shape */}
+      {selectedShapeId && (() => {
+        const selectedShape = allShapes.find(s => s.id === selectedShapeId);
+        if (selectedShape) {
+          const deleteButtonX = selectedShape.x + 50;
+          const deleteButtonY = selectedShape.y - 40;
+          return (
+            <button
+              className="shape-delete-button"
+              style={{
+                left: `${deleteButtonX}px`,
+                top: `${deleteButtonY}px`,
+              }}
+              onClick={() => {
+                handleDelete(selectedShapeId, selectedShape.isPrivate);
+                setSelectedShapeId(null);
+              }}
+              title="Delete shape"
+            >
+              ×
+            </button>
+          );
+        }
+      })()}
     </div>
   );
 }
