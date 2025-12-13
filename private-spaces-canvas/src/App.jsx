@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
-import { Stage, Layer, Rect, Circle, Star } from 'react-konva';
+import { Stage, Layer, Rect, Circle, Star, Transformer  } from 'react-konva';
 import { v4 as uuidv4 } from 'uuid';
 
 // Icon components 
@@ -56,9 +56,10 @@ const cursorColors = [
 ];
 
 // Random nickname generator
-const adjectives = ['Happy', 'Swift', 'Clever', 'Brave', 'Calm', 'Witty', 'Bold', 'Wise', 'Kind', 'Cool'];
-const animals = ['Panda', 'Fox', 'Owl', 'Tiger', 'Bear', 'Wolf', 'Eagle', 'Dolphin', 'Koala', 'Lynx'];
+const adjectives = ['Happy', 'Swift', 'Clever', 'Brave', 'Calm', 'Witty', 'Bold', 'Wise', 'Kind', 'Cool', 'Bright', 'Jolly'];
+const animals = ['Panda', 'Fox', 'Owl', 'Tiger', 'Bear', 'Wolf', 'Eagle', 'Dolphin', 'Koala', 'Lynx', 'Rabbit', 'Hawk', 'Otter'];
 
+// Generating some randome names??????
 const generateNickname = () => {
   const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
   const animal = animals[Math.floor(Math.random() * animals.length)];
@@ -94,6 +95,10 @@ function App() {
   const lastShapeUpdateRef = useRef(0);
   const SHAPE_THROTTLE_MS = 100; 
 
+const [selectedIds, setSelectedIds] = useState([]);
+const transformerRef = useRef(null);
+const shapeRefs = useRef({});
+
   // Generate user identity once on mount
   const userRef = useRef({
     id: uuidv4(),
@@ -101,12 +106,24 @@ function App() {
     color: generateUserColor(),
   });
 
+  useEffect(() => {
+      if (transformerRef.current) {
+          const nodes = selectedIds
+              .map(id => shapeRefs.current[id])
+              .filter(node => node); // Filter out undefined
+          
+          transformerRef.current.nodes(nodes);
+          transformerRef.current.getLayer()?.batchDraw();
+      }
+  }, [selectedIds]);
+
   // Save private shapes to localStorage whenever they change
   useEffect(() => {
     localStorage.setItem(PRIVATE_SHAPES_KEY, JSON.stringify(privateShapes));
   }, [privateShapes]);
 
   useEffect(() => {
+    setOnlineUsers([userRef.current]);
     const ws = new WebSocket('ws://localhost:3001');
     wsRef.current = ws;
 
@@ -133,8 +150,15 @@ function App() {
               initialCursors[user.id] = user;
             });
             setCursors(initialCursors);
-            setOnlineUsers(data.users);
+            
+            // Ensure current user is in the list
+            const users = [...data.users];
+            if (!users.find(u => u.id === userRef.current.id)) {
+              users.push(userRef.current);
+            }
+            setOnlineUsers(users);
           }
+
           break;
 
         case 'USER_JOINED':
@@ -239,6 +263,7 @@ function App() {
       const now = Date.now();
       if (now - lastSent < SHAPE_THROTTLE_MS
         
+
       ) return;
       lastSent = now;
 
@@ -262,38 +287,52 @@ function App() {
   };
 
   const handleClick = (e) => {
-    if (e.target !== e.target.getStage()) return;
+      if (e.target === e.target.getStage()) {
+          if (selectedIds.length > 0) {
+              setSelectedIds([]);
+              return;
+          }
 
-    setSelectedShapeId(null);
+          const stage = e.target.getStage();
+          const pos = stage.getPointerPosition();
 
-    const stage = e.target.getStage();
-    const pos = stage.getPointerPosition();
+          const newShape = {
+              id: uuidv4(),
+              x: pos.x,
+              y: pos.y,
+              type: selectedTool,
+              fill: selectedColor,
+              isPrivate: isPrivateMode,
+              isLocked: false,
+              lockedBy: null,
+          };
 
-    const newShape = {
-      id: uuidv4(),
-      x: pos.x,
-      y: pos.y,
-      type: selectedTool,
-      fill: selectedColor,
-      isPrivate: isPrivateMode,
-      isLocked: false,
-    };
-
-    if (isPrivateMode) {
-      setPrivateShapes(prev => [...prev, newShape]);
-    } else {
-      setShapes(prev => [...prev, newShape]);
-      sendMessage({ type: 'ADD_SHAPE', shape: newShape });
-    }
+          if (isPrivateMode) {
+              setPrivateShapes(prev => [...prev, newShape]);
+          } else {
+              setShapes(prev => [...prev, newShape]);
+              sendMessage({ type: 'ADD_SHAPE', shape: newShape });
+          }
+      }
   };
 
   const handleDelete = (id, isPrivate) => {
-    if (isPrivate) {
-      setPrivateShapes(prev => prev.filter(s => s.id !== id));
-    } else {
-      setShapes(prev => prev.filter(s => s.id !== id));
-      sendMessage({ type: 'DELETE_SHAPE', id });
-    }
+      if (isPrivate) {
+          const idsToDelete = selectedIds.length > 0 && selectedIds.includes(id) 
+              ? selectedIds 
+              : [id];
+          setPrivateShapes(prev => prev.filter(s => !idsToDelete.includes(s.id)));
+          setSelectedIds([]);
+      } else {
+          const idsToDelete = selectedIds.length > 0 && selectedIds.includes(id) 
+              ? selectedIds 
+              : [id];
+          setShapes(prev => prev.filter(s => !idsToDelete.includes(s.id)));
+          idsToDelete.forEach(deleteId => {
+              sendMessage({ type: 'DELETE_SHAPE', id: deleteId });
+          });
+          setSelectedIds([]);
+      }
   };
 
   const handleClearAll = () => {
@@ -313,63 +352,130 @@ function App() {
   };
 
   const handleDragEnd = (e, shape) => {
-    const updatedShape = {
-      ...shape,
-      x: e.target.x(),
-      y: e.target.y(),
-    };
+    const node = e.target;
 
     if (shape.isPrivate) {
-      setPrivateShapes(prev =>
-        prev.map(s => s.id === shape.id ? updatedShape : s)
-      );
+        setPrivateShapes(prev =>
+            prev.map(s => s.id === shape.id 
+                ? { ...s, x: node.x(), y: node.y() } 
+                : s
+            )
+        );
     } else {
-      setShapes(prev =>
-        prev.map(s => s.id === shape.id ? updatedShape : s)
-      );
-      sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
+        // Update local state for all selected shapes
+        const idsToUpdate = selectedIds.includes(shape.id) ? selectedIds : [shape.id];
+        setShapes(prev => prev.map(s => {
+            if (idsToUpdate.includes(s.id)) {
+                const ref = shapeRefs.current[s.id];
+                return ref ? { ...s, x: ref.x(), y: ref.y() } : s;
+            }
+            return s;
+        }));
+
+        if (selectedIds.includes(shape.id)) {
+            selectedIds.forEach(id => {
+                const s = shapes.find(sh => sh.id === id);
+                const ref = shapeRefs.current[id];
+                if (s && ref) {
+                    const updatedShape = { ...s, x: ref.x(), y: ref.y() };
+                    sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
+                }
+            });
+
+            // Unlock all selected shapes
+            sendMessage({ 
+                type: 'UNLOCK_GROUP_REQUEST', 
+                shapeIds: selectedIds 
+            });
+        } else {
+            sendMessage({ 
+                type: 'UPDATE_SHAPE', 
+                shape: { ...shape, x: node.x(), y: node.y() } 
+            });
+            sendMessage({ type: 'UNLOCK_REQUEST', shapeId: shape.id });
+        }
     }
-    if (!shape.isPrivate) {
-        sendMessage({ type: 'UNLOCK_REQUEST', shapeId: shape.id });
-    }
-  };
+};
 
   const handleDragMove = (e, shape) => {
-    const updatedShape = {
-      ...shape,
-      x: e.target.x(),
-      y: e.target.y(),
-    };
+      const node = e.target;
+      const dx = node.x() - shape.x;
+      const dy = node.y() - shape.y;
 
-    if (shape.isPrivate) {
-      setPrivateShapes(prev =>
-        prev.map(s => s.id === shape.id ? updatedShape : s)
-      );
-    } else {
-      setShapes(prev =>
-        prev.map(s => s.id === shape.id ? updatedShape : s)
-      );
-      // sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
-              // NEW: Throttle network updates
-      const now = Date.now();
-      if (now - lastShapeUpdateRef.current >= SHAPE_THROTTLE_MS) {
-          lastShapeUpdateRef.current = now;
-          sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
-      }
+      if (shape.isPrivate) {
+          setPrivateShapes(prev =>
+              prev.map(s => s.id === shape.id 
+                  ? { ...s, x: node.x(), y: node.y() } 
+                  : s
+              )
+          );
+      } else {
+          // Move all selected shapes together
+          if (selectedIds.includes(shape.id) && selectedIds.length > 1) {
+              // Direct node manipulation for performance
+              selectedIds.forEach(id => {
+                  if (id !== shape.id) {
+                      const otherNode = shapeRefs.current[id];
+                      const otherShape = shapes.find(s => s.id === id);
+                      if (otherNode && otherShape) {
+                          otherNode.x(otherShape.x + dx);
+                          otherNode.y(otherShape.y + dy);
+                      }
+                  }
+              });
+
+              // Throttled network update for all selected shapes
+              const now = Date.now();
+              if (now - lastShapeUpdateRef.current >= SHAPE_THROTTLE_MS) {
+                  lastShapeUpdateRef.current = now;
+                  selectedIds.forEach(id => {
+                      const s = shapes.find(sh => sh.id === id);
+                      const n = shapeRefs.current[id];
+                      if (s && n) {
+                          const updatedShape = { ...s, x: n.x(), y: n.y() };
+                          sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
+                      }
+                  });
+              }
+          } else {
+              // Single shape movement
+              const now = Date.now();
+              if (now - lastShapeUpdateRef.current >= SHAPE_THROTTLE_MS) {
+                  lastShapeUpdateRef.current = now;
+                  sendMessage({ 
+                      type: 'UPDATE_SHAPE', 
+                      shape: { ...shape, x: node.x(), y: node.y() } 
+                  });
+              }
+        }
     }
   };
 
   const handleDragStart = (e, shape) => {
-    if (shape.isLocked && shape.lockedBy !== userRef.current.id) {
+    const isLockedByOther = shape.isLocked && shape.lockedBy !== userRef.current.id;
+
+    if (isLockedByOther) {
         e.target.stopDrag();
         return;
     }
-    
-    if (!shape.isPrivate) {
-        sendMessage({ type: 'LOCK_REQUEST', shapeId: shape.id });
+
+    // If dragging a selected shape, lock all selected shapes
+    if (selectedIds.includes(shape.id)) {
+        if (!shape.isPrivate) {
+            sendMessage({ 
+                type: 'LOCK_GROUP_REQUEST', 
+                shapeIds: selectedIds 
+            });
+        }
+    } else {
+        // If dragging unselected shape, select it and lock only it
+        setSelectedIds([shape.id]);
+        if (!shape.isPrivate) {
+            sendMessage({ type: 'LOCK_REQUEST', shapeId: shape.id });
+        }
     }
   };
-
+  
   const handlePrivateModeToggle = () => {
     if (!isPrivateMode) {
       setShowPrivateConfirmation(true);
@@ -408,9 +514,14 @@ function App() {
 
   const renderShape = (shape) => {
     const isLockedByOther = shape.isLocked && shape.lockedBy !== userRef.current.id;
+    const isSelected = selectedIds.includes(shape.id); 
 
     const props = {
       key: shape.id,
+      ref: (node) => {
+        if (node) shapeRefs.current[shape.id] = node;
+        else delete shapeRefs.current[shape.id];
+      },
       x: shape.x,
       y: shape.y,
       fill: shape.fill,
@@ -420,8 +531,25 @@ function App() {
       opacity: isLockedByOther ? 0.6 : 1,
       onDragMove: (e) => handleDragMove(e, shape),
       onDragEnd: (e) => handleDragEnd(e, shape),
-      onClick: () => setSelectedShapeId(shape.id),
+      // onClick: () => setSelectedShapeId(shape.id),
       onDblClick: () => setSelectedShapeId(shape.id),
+      onClick: (e) => {
+            e.cancelBubble = true;
+            if (isLockedByOther) return;
+
+            if (e.evt.shiftKey) {
+                // Shift+Click: Add/remove from selection
+                setSelectedIds(prev => 
+                    prev.includes(shape.id)
+                        ? prev.filter(id => id !== shape.id)
+                        : [...prev, shape.id]
+                );
+            } else {
+                // regular click
+                setSelectedIds([shape.id]);
+            }
+        },
+
       // Add dashed stroke for private shapes to visually distinguish them
       stroke: shape.isPrivate ? '#FF1493' : undefined,
       strokeWidth: shape.isPrivate ? 3 : 0,
@@ -599,6 +727,18 @@ function App() {
       >
         <Layer>
           {allShapes.map(renderShape)}
+          {/* Transformer for selection handle (visuals) */}
+          <Transformer
+              ref={transformerRef}
+              resizeEnabled={false}
+              rotateEnabled={false}
+              borderStroke="#0096FF"
+              borderStrokeWidth={2}
+              anchorSize={8}
+              anchorFill="#ffffff"
+              anchorStroke="#0096FF"
+              anchorCornerRadius={2}
+          />
         </Layer>
       </Stage>
 
