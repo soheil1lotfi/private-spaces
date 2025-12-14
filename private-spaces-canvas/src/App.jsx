@@ -95,6 +95,7 @@ function App() {
 
   const lastShapeUpdateRef = useRef(0);
   const SHAPE_THROTTLE_MS = 100; 
+  const dragStartPositions = useRef({}); // Store initial positions when drag starts
 
   const [selectedIds, setSelectedIds] = useState([]);
   const transformerRef = useRef(null);
@@ -296,6 +297,19 @@ function App() {
       return;
     }
 
+    // Store initial positions for all selected shapes
+    dragStartPositions.current = {};
+    if (selectedIds.includes(id)) {
+      selectedIds.forEach(selectedId => {
+        const selectedShape = allShapes.find(s => s.id === selectedId);
+        if (selectedShape) {
+          dragStartPositions.current[selectedId] = { x: selectedShape.x, y: selectedShape.y };
+        }
+      });
+    } else {
+      dragStartPositions.current[id] = { x: shape.x, y: shape.y };
+    }
+
     // Set dragging in awareness
     const localState = awarenessRef.current.getLocalState();
     awarenessRef.current.setLocalState({
@@ -319,19 +333,61 @@ function App() {
     const newX = e.target.x();
     const newY = e.target.y();
 
-    if (shape.isPrivate) {
-      setPrivateShapes(prev =>
-        prev.map(s => (s.id === id ? { ...s, x: newX, y: newY } : s))
-      );
+    // Get initial position for this shape
+    const initialPos = dragStartPositions.current[id];
+    if (!initialPos) return;
+
+    // Calculate delta from initial position
+    const deltaX = newX - initialPos.x;
+    const deltaY = newY - initialPos.y;
+
+    // If this shape is part of a multi-selection, move all selected shapes
+    if (selectedIds.includes(id) && selectedIds.length > 1) {
+      selectedIds.forEach(selectedId => {
+        const initialSelectedPos = dragStartPositions.current[selectedId];
+        if (!initialSelectedPos) return;
+
+        const updatedX = initialSelectedPos.x + deltaX;
+        const updatedY = initialSelectedPos.y + deltaY;
+
+        const selectedShape = allShapes.find(s => s.id === selectedId);
+        if (selectedShape) {
+          if (selectedShape.isPrivate) {
+            setPrivateShapes(prev =>
+              prev.map(s => (s.id === selectedId ? { ...s, x: updatedX, y: updatedY } : s))
+            );
+          } else {
+            const shapeData = shapesMapRef.current.get(selectedId);
+            if (shapeData) {
+              shapesMapRef.current.set(selectedId, { ...shapeData, x: updatedX, y: updatedY });
+            }
+          }
+
+          // Update the Konva node position directly for smooth dragging
+          if (shapeRefs.current[selectedId] && selectedId !== id) {
+            shapeRefs.current[selectedId].position({ x: updatedX, y: updatedY });
+          }
+        }
+      });
     } else {
-      const shapeData = shapesMapRef.current.get(id);
-      if (shapeData) {
-        shapesMapRef.current.set(id, { ...shapeData, x: newX, y: newY });
+      // Single shape drag
+      if (shape.isPrivate) {
+        setPrivateShapes(prev =>
+          prev.map(s => (s.id === id ? { ...s, x: newX, y: newY } : s))
+        );
+      } else {
+        const shapeData = shapesMapRef.current.get(id);
+        if (shapeData) {
+          shapesMapRef.current.set(id, { ...shapeData, x: newX, y: newY });
+        }
       }
     }
   };
 
   const handleDragEnd = () => {
+    // Clear stored positions
+    dragStartPositions.current = {};
+    
     // Release drag lock
     const localState = awarenessRef.current.getLocalState();
     awarenessRef.current.setLocalState({
@@ -458,6 +514,7 @@ function App() {
       fill: shape.fill,
       stroke: isDraggingByOther ? draggingUserColor : (isSelected ? '#0096FF' : '#000'),
       strokeWidth: isDraggingByOther ? 3 : (isSelected ? 2 : 1),
+      dash: shape.isPrivate ? [8, 4] : undefined,
       draggable: !isDraggingByOther,
       onClick: (e) => handleShapeClick(e, shape),
       onTap: (e) => handleShapeClick(e, shape),
