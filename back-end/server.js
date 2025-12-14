@@ -3,7 +3,11 @@ const cors = require("cors");
 const http = require("http");
 const { WebSocketServer } = require("ws");
 const mongoose = require("mongoose");
-const Shape = require("./models/shapes");
+const Y = require("yjs");
+const awarenessProtocol = require("y-protocols/awareness");
+const syncProtocol = require("y-protocols/sync");
+const encoding = require("lib0/encoding");
+const decoding = require("lib0/decoding");
 
 const app = express();
 
@@ -13,6 +17,8 @@ app.use(express.json());
 const dbURI =
   "mongodb+srv://soheil1lotfi:soloLotfi@cscw.93kngev.mongodb.net/?appName=CSCW";
 const server = http.createServer(app);
+
+// Connect to MongoDB
 mongoose
   .connect(dbURI)
   .then(() => {
@@ -24,223 +30,195 @@ mongoose
     console.error("MongoDB connection error:", err);
   });
 
+// Y.js WebSocket Server
 const wss = new WebSocketServer({ server });
 
-let shapes = [];
-const clients = new Map(); // Map<ws, { id, nickname, color, x, y, isPrivateMode }
+// Store Y.js documents
+const docs = new Map(); // docName -> { doc: Y.Doc, awareness: Awareness, connections: Set }
+
+const messageSync = 0;
+const messageAwareness = 1;
+
+// Get or create Y.js document
+function getYDoc(docName) {
+  if (!docs.has(docName)) {
+    const doc = new Y.Doc();
+    const awareness = new awarenessProtocol.Awareness(doc);
+
+    docs.set(docName, {
+      doc,
+      awareness,
+      connections: new Set(),
+    });
+
+    // Broadcast updates to all connected clients
+    doc.on("update", (update, origin) => {
+      const encoder = encoding.createEncoder();
+      encoding.writeVarUint(encoder, messageSync);
+      syncProtocol.writeUpdate(encoder, update);
+      const message = encoding.toUint8Array(encoder);
+
+      const docData = docs.get(docName);
+      if (docData) {
+        docData.connections.forEach((client) => {
+          if (client !== origin && client.readyState === 1) {
+            client.send(message);
+          }
+        });
+      }
+    });
+
+    // Load from MongoDB on first access
+    loadDocumentFromDB(docName, doc);
+
+    // Setup persistence
+    setupPersistence(docName, doc);
+  }
+  return docs.get(docName);
+}
+
+// Load Y.js document from MongoDB
+async function loadDocumentFromDB(docName, ydoc) {
+  try {
+    const Shape = require("./models/shapes");
+    const dbShapes = await Shape.find();
+
+    if (dbShapes.length > 0) {
+      const shapesMap = ydoc.getMap("shapes");
+      dbShapes.forEach((shape) => {
+        shapesMap.set(shape.id, {
+          id: shape.id,
+          x: shape.x,
+          y: shape.y,
+          type: shape.type,
+          fill: shape.fill,
+          isPrivate: shape.isPrivate || false,
+          isLocked: shape.isLocked || false,
+        });
+      });
+      console.log(`Loaded ${dbShapes.length} shapes from MongoDB`);
+    }
+  } catch (error) {
+    console.error("Error loading from MongoDB:", error);
+  }
+}
+
+// Persist Y.js document to MongoDB periodically
+function setupPersistence(docName, ydoc) {
+  const Shape = require("./models/shapes");
+  const shapesMap = ydoc.getMap("shapes");
+
+  let isDirty = false;
+
+  shapesMap.observe(() => {
+    isDirty = true;
+  });
+
+  setInterval(async () => {
+    if (!isDirty) return;
+    isDirty = false;
+
+    try {
+      await Shape.deleteMany({});
+
+      const shapes = [];
+      shapesMap.forEach((shape) => {
+        if (!shape.isPrivate) {
+          shapes.push({
+            id: shape.id,
+            x: shape.x,
+            y: shape.y,
+            type: shape.type,
+            fill: shape.fill,
+            isPrivate: shape.isPrivate || false,
+            isLocked: shape.isLocked || false,
+          });
+        }
+      });
+
+      if (shapes.length > 0) {
+        await Shape.insertMany(shapes);
+        console.log(`Persisted ${shapes.length} shapes to MongoDB`);
+      }
+    } catch (error) {
+      console.error("Error persisting to MongoDB:", error);
+    }
+  }, 5000);
+}
 
 wss.on("connection", (ws) => {
-  console.log("New client connected");
+  console.log("New Y.js client connected");
 
-  ws.on("message", async (message) => {
-    const data = JSON.parse(message);
+  const docName = "collaborative-whiteboard";
+  const { doc, awareness, connections } = getYDoc(docName);
 
-    switch (data.type) {
-      case "USER_JOIN":
-        // Register user with their identity
-        clients.set(ws, {
-          id: data.user.id,
-          nickname: data.user.nickname,
-          color: data.user.color,
-          x: 0,
-          y: 0,
-          isPrivateMode: false,
-        });
-        console.log(`User joined: ${data.user.nickname}`);
+  connections.add(ws);
 
-        const dbShapes = await Shape.find();
-        console.log(
-          `User joined: ${data.user.nickname} with color: ${data.user.color}`
-        );
+  // Send sync step 1
+  const encoderSync = encoding.createEncoder();
+  encoding.writeVarUint(encoderSync, messageSync);
+  syncProtocol.writeSyncStep1(encoderSync, doc);
+  ws.send(encoding.toUint8Array(encoderSync));
 
-        // Send current shapes and ALL users (including this new user) to the new client
-        const allUsers = Array.from(clients.values());
-        ws.send(
-          JSON.stringify({
-            type: "INIT",
-            shapes: dbShapes,
-            users: Array.from(clients.values()).filter(
-              (u) => u.id !== data.user.id
-            ),
-          })
-        );
+  // Send awareness states
+  const encoderAwareness = encoding.createEncoder();
+  encoding.writeVarUint(encoderAwareness, messageAwareness);
+  encoding.writeVarUint8Array(
+    encoderAwareness,
+    awarenessProtocol.encodeAwarenessUpdate(
+      awareness,
+      Array.from(awareness.getStates().keys())
+    )
+  );
+  ws.send(encoding.toUint8Array(encoderAwareness));
 
-        // Notify other clients about the new user
-        broadcastExcept(ws, {
-          type: "USER_JOINED",
-          user: clients.get(ws),
-        });
-        break;
+  ws.on("message", (message) => {
+    try {
+      const uint8Array = new Uint8Array(message);
+      const decoder = decoding.createDecoder(uint8Array);
+      const messageType = decoding.readVarUint(decoder);
 
-      case "CURSOR_MOVE":
-        const user = clients.get(ws);
-        if (user) {
-          user.x = data.x;
-          user.y = data.y;
-          broadcastExcept(ws, {
-            type: "CURSOR_UPDATE",
-            userId: user.id,
-            x: data.x,
-            y: data.y,
-          });
+      if (messageType === messageSync) {
+        // Handle sync message
+        const encoder = encoding.createEncoder();
+        encoding.writeVarUint(encoder, messageSync);
+        syncProtocol.readSyncMessage(decoder, encoder, doc, ws);
+
+        // Send reply to the sender (if any)
+        if (encoding.length(encoder) > 1) {
+          ws.send(encoding.toUint8Array(encoder));
         }
-        break;
+      } else if (messageType === messageAwareness) {
+        // Handle awareness message
+        awarenessProtocol.applyAwarenessUpdate(
+          awareness,
+          decoding.readVarUint8Array(decoder),
+          ws
+        );
 
-      case "ADD_SHAPE":
-        shapes.push(data.shape);
-        new Shape({
-          id: data.shape.id,
-          x: data.shape.x,
-          y: data.shape.y,
-          type: data.shape.type,
-          fill: data.shape.fill,
-          isPrivate: data.shape.isPrivate,
-          isLocked: data.shape.isLocked,
-        }).save();
-
-        broadcastExcept(ws, {
-          type: "SHAPE_ADDED",
-          shape: data.shape,
-        });
-        break;
-
-      case "UPDATE_SHAPE":
-        await Shape.findOneAndUpdate(
-          { id: data.shape.id },
-          {
-            x: data.shape.x,
-            y: data.shape.y,
-            type: data.shape.type,
-            fill: data.shape.fill,
-            isPrivate: data.shape.isPrivate,
-            isLocked: data.shape.isLocked,
+        // Broadcast to other clients
+        connections.forEach((client) => {
+          if (client !== ws && client.readyState === 1) {
+            client.send(uint8Array);
           }
-        );
-
-        shapes = shapes.map((s) => (s.id === data.shape.id ? data.shape : s));
-        broadcastExcept(ws, {
-          type: "SHAPE_UPDATED",
-          shape: data.shape,
         });
-        break;
-
-      case "DELETE_SHAPE":
-        await Shape.deleteOne({ id: data.id });
-
-        shapes = shapes.filter((s) => s.id !== data.id);
-        broadcastExcept(ws, {
-          type: "SHAPE_DELETED",
-          id: data.id,
-        });
-        break;
-
-      case "CLEAR_ALL":
-        await Shape.deleteMany({});
-
-        shapes = [];
-        broadcast({ type: "ALL_CLEARED" });
-        break;
-
-      case "LOCK_REQUEST":
-        const shapeToLock = shapes.find((s) => s.id === data.shapeId);
-        const requestingUser = clients.get(ws);
-
-        if (
-          shapeToLock.isLocked &&
-          shapeToLock.lockedBy !== requestingUser.id
-        ) {
-          ws.send(
-            JSON.stringify({
-              type: "LOCK_DENIED",
-              shapeId: data.shapeId,
-            })
-          );
-        } else {
-          shapeToLock.isLocked = true;
-          shapeToLock.lockedBy = requestingUser.id;
-
-          ws.send(
-            JSON.stringify({
-              type: "LOCK_GRANTED",
-              shapeId: data.shapeId,
-            })
-          );
-
-          broadcastExcept(ws, {
-            type: "SHAPE_UPDATED",
-            shape: shapeToLock,
-          });
-        }
-        break;
-
-      case "UNLOCK_REQUEST":
-        const shapeToUnlock = shapes.find((s) => s.id === data.shapeId);
-        const unlockingUser = clients.get(ws);
-
-        if (shapeToUnlock && shapeToUnlock.lockedBy === unlockingUser.id) {
-          shapeToUnlock.isLocked = false;
-          shapeToUnlock.lockedBy = null;
-
-          broadcast({
-            type: "SHAPE_UPDATED",
-            shape: shapeToUnlock,
-          });
-        }
-        break;
-
-      case "PRIVATE_MODE_CHANGED":
-        const userPrivate = clients.get(ws);
-        if (userPrivate) {
-          userPrivate.isPrivateMode = data.isPrivateMode;
-          console.log(
-            `User ${userPrivate.nickname} private mode: ${data.isPrivateMode}`
-          );
-
-          // Broadcast private mode change to all other clients
-          broadcastExcept(ws, {
-            type: "PRIVATE_MODE_CHANGED",
-            userId: userPrivate.id,
-            isPrivateMode: data.isPrivateMode,
-          });
-        }
-        break;
+      }
+    } catch (error) {
+      console.error("Error handling message:", error);
     }
   });
 
   ws.on("close", () => {
-    const user = clients.get(ws);
-    if (user) {
-      shapes.forEach((shape) => {
-        if (shape.lockedBy === user.id) {
-          shape.isLocked = false;
-          shape.lockedBy = null;
-          broadcast({ type: "SHAPE_UPDATED", shape });
-        }
-      });
-      console.log(`User left: ${user.nickname}`);
-      broadcastExcept(ws, {
-        type: "USER_LEFT",
-        userId: user.id,
-      });
-    }
-    clients.delete(ws);
+    console.log("Y.js client disconnected");
+    connections.delete(ws);
+
+    // Remove from awareness
+    awarenessProtocol.removeAwarenessStates(awareness, [ws], null);
+  });
+
+  ws.on("error", (error) => {
+    console.error("WebSocket error:", error);
   });
 });
 
-function broadcast(data) {
-  const message = JSON.stringify(data);
-  clients.forEach((userData, ws) => {
-    if (ws.readyState === 1) {
-      ws.send(message);
-    }
-  });
-}
-
-function broadcastExcept(excludeWs, data) {
-  const message = JSON.stringify(data);
-  clients.forEach((userData, ws) => {
-    if (ws !== excludeWs && ws.readyState === 1) {
-      ws.send(message);
-    }
-  });
-}
+console.log("Y.js WebSocket server initialized");

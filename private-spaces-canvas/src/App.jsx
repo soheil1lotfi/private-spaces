@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 import { Stage, Layer, Rect, Circle, Star, Transformer  } from 'react-konva';
 import { v4 as uuidv4 } from 'uuid';
+import * as Y from 'yjs';
+import { WebsocketProvider } from 'y-websocket';
 
 // Icon components 
 const CircleIcon = () => (
@@ -90,14 +92,13 @@ function App() {
   const [cursors, setCursors] = useState({}); // { userId: { id, nickname, color, x, y } }
   const [selectedShapeId, setSelectedShapeId] = useState(null);
   const [onlineUsers, setOnlineUsers] = useState([]);
-  const wsRef = useRef(null);
 
   const lastShapeUpdateRef = useRef(0);
   const SHAPE_THROTTLE_MS = 100; 
 
-const [selectedIds, setSelectedIds] = useState([]);
-const transformerRef = useRef(null);
-const shapeRefs = useRef({});
+  const [selectedIds, setSelectedIds] = useState([]);
+  const transformerRef = useRef(null);
+  const shapeRefs = useRef({});
 
   // Generate user identity once on mount
   const userRef = useRef({
@@ -105,6 +106,12 @@ const shapeRefs = useRef({});
     nickname: generateNickname(),
     color: generateUserColor(),
   });
+
+  // Y.js refs
+  const ydocRef = useRef(null);
+  const providerRef = useRef(null);
+  const shapesMapRef = useRef(null);
+  const awarenessRef = useRef(null);
 
   useEffect(() => {
       if (transformerRef.current) {
@@ -122,471 +129,378 @@ const shapeRefs = useRef({});
     localStorage.setItem(PRIVATE_SHAPES_KEY, JSON.stringify(privateShapes));
   }, [privateShapes]);
 
+  // Y.js initialization
   useEffect(() => {
     setOnlineUsers([userRef.current]);
-    const ws = new WebSocket('ws://localhost:3001');
-    wsRef.current = ws;
+    
+    // Create Y.js document
+    const ydoc = new Y.Doc();
+    ydocRef.current = ydoc;
 
-    ws.onopen = () => {
-      console.log('Connected to server');
-      setIsConnected(true);
-      // Send user identity to server
-      ws.send(JSON.stringify({
-        type: 'USER_JOIN',
-        user: userRef.current,
-      }));
-    };
+    // Connect to WebSocket provider
+    const provider = new WebsocketProvider(
+      `ws://${window.location.hostname}:3001`,
+      'collaborative-whiteboard',
+      ydoc
+    );
+    providerRef.current = provider;
 
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+    // Get shared data structures
+    const shapesMap = ydoc.getMap('shapes');
+    shapesMapRef.current = shapesMap;
 
-      switch (data.type) {
-        case 'INIT':
-          setShapes(data.shapes);
-          // Initialize cursors and online users from existing users
-          if (data.users) {
-            const initialCursors = {};
-            data.users.forEach(user => {
-              initialCursors[user.id] = user;
-            });
-            setCursors(initialCursors);
-            
-            // Ensure current user is in the list
-            const users = [...data.users];
-            if (!users.find(u => u.id === userRef.current.id)) {
-              users.push(userRef.current);
-            }
-            setOnlineUsers(users);
-          }
+    // Get awareness for ephemeral state
+    const awareness = provider.awareness;
+    awarenessRef.current = awareness;
 
-          break;
+    // Set local user state in awareness
+    awareness.setLocalState({
+      user: userRef.current,
+      cursor: { x: 0, y: 0 },
+      dragging: null,
+      isPrivateMode: false,
+    });
 
-        case 'USER_JOINED':
-          setCursors(prev => ({
-            ...prev,
-            [data.user.id]: data.user,
-          }));
-          setOnlineUsers(prev => {
-            if (prev.find(u => u.id === data.user.id)) return prev;
-            return [...prev, data.user];
-          });
-          break;
-
-        case 'USER_LEFT':
-          setCursors(prev => {
-            const next = { ...prev };
-            delete next[data.userId];
-            return next;
-          });
-          setOnlineUsers(prev => prev.filter(u => u.id !== data.userId));
-          break;
-
-        case 'CURSOR_UPDATE':
-          setCursors(prev => ({
-            ...prev,
-            [data.userId]: {
-              ...prev[data.userId],
-              x: data.x,
-              y: data.y,
-            },
-          }));
-          break;
-
-        case 'SHAPE_ADDED':
-          setShapes(prev => {
-            if (prev.find(s => s.id === data.shape.id)) return prev;
-            return [...prev, data.shape];
-          });
-          break;
-
-        case 'SHAPE_UPDATED':
-          setShapes(prev =>
-            prev.map(s => s.id === data.shape.id ? data.shape : s)
-          );
-          break;
-
-        case 'SHAPE_DELETED':
-          setShapes(prev => prev.filter(s => s.id !== data.id));
-          break;
-
-        case 'ALL_CLEARED':
-          setShapes([]);
-          break;
-
-        case 'PRIVATE_MODE_CHANGED':
-          // Update online users to reflect private mode status
-          setOnlineUsers(prev => {
-            const updated = prev.map(u => u.id === data.userId ? { ...u, isPrivateMode: data.isPrivateMode } : u);
-            
-            // If user left private mode, restore their cursor
-            if (!data.isPrivateMode) {
-              const user = updated.find(u => u.id === data.userId);
-              if (user) {
-                setCursors(prevCursors => ({
-                  ...prevCursors,
-                  [user.id]: user,
-                }));
-              }
-            }
-            
-            return updated;
-          });
-          
-          // If user entered private mode, remove their cursor
-          if (data.isPrivateMode) {
-            setCursors(prev => {
-              const next = { ...prev };
-              delete next[data.userId];
-              return next;
-            });
-          }
-          break;
+    // Connection status
+    provider.on('status', (event) => {
+      setIsConnected(event.status === 'connected');
+      if (event.status === 'connected') {
+        console.log('Connected to Y.js server');
       }
+    });
+
+    // Listen to shapes changes
+    const updateShapes = () => {
+      const shapesArray = [];
+      shapesMap.forEach((shape) => {
+        if (!shape.isPrivate) {
+          shapesArray.push(shape);
+        }
+      });
+      setShapes(shapesArray);
     };
 
-    ws.onclose = () => {
-      console.log('Disconnected from server');
-      setIsConnected(false);
+    shapesMap.observe(updateShapes);
+    updateShapes();
+
+    // Listen to awareness changes
+    const updateAwareness = () => {
+      const states = awareness.getStates();
+      const newCursors = {};
+      const users = [];
+
+      states.forEach((state) => {
+        if (!state.user) return;
+
+        // Cursors for other users
+        if (state.user.id !== userRef.current.id && !state.isPrivateMode) {
+          newCursors[state.user.id] = {
+            ...state.user,
+            x: state.cursor?.x || 0,
+            y: state.cursor?.y || 0,
+            isPrivateMode: state.isPrivateMode || false,
+          };
+        }
+
+        // Track online users
+        users.push({
+          ...state.user,
+          isPrivateMode: state.isPrivateMode || false,
+        });
+      });
+
+      setCursors(newCursors);
+      setOnlineUsers(users);
     };
 
-    return () => ws.close();
-  }, []);
+    awareness.on('change', updateAwareness);
+    updateAwareness();
 
-  // Track mouse movement and send cursor updates (throttled)
-  useEffect(() => {
-    let lastSent = 0;
-
+    // Mouse move tracking
     const handleMouseMove = (e) => {
-      // Don't send cursor position if in private mode
-      if (isPrivateMode) return;
-
-      const now = Date.now();
-      if (now - lastSent < SHAPE_THROTTLE_MS
-        
-
-      ) return;
-      lastSent = now;
-
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'CURSOR_MOVE',
-          x: e.clientX,
-          y: e.clientY,
-        }));
-      }
+      const localState = awareness.getLocalState();
+      awareness.setLocalState({
+        ...localState,
+        cursor: { x: e.clientX, y: e.clientY },
+      });
     };
 
     window.addEventListener('mousemove', handleMouseMove);
-    return () => window.removeEventListener('mousemove', handleMouseMove);
-  }, [isPrivateMode]);
 
-  const sendMessage = (data) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(data));
+    // Cleanup
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      shapesMap.unobserve(updateShapes);
+      awareness.off('change', updateAwareness);
+      provider.destroy();
+      ydoc.destroy();
+    };
+  }, []);
+
+  const handleClick = (e) => {
+    // If clicking on empty canvas
+    if (e.target === e.target.getStage()) {
+      const stage = e.target.getStage();
+      const pointerPosition = stage.getPointerPosition();
+
+      const newShape = {
+        id: uuidv4(),
+        x: pointerPosition.x,
+        y: pointerPosition.y,
+        type: selectedTool,
+        fill: selectedColor,
+        isPrivate: isPrivateMode,
+        isLocked: false,
+      };
+
+      if (isPrivateMode) {
+        setPrivateShapes(prev => [...prev, newShape]);
+      } else {
+        shapesMapRef.current.set(newShape.id, newShape);
+      }
+      
+      setSelectedIds([]);
+      setSelectedShapeId(null);
     }
   };
 
-  const handleClick = (e) => {
-      if (e.target === e.target.getStage()) {
-          if (selectedIds.length > 0) {
-              setSelectedIds([]);
-              return;
-          }
+  const handleShapeClick = (e, shape) => {
+    e.cancelBubble = true;
+    const id = shape.id;
+    const isMultiSelect = e.evt.shiftKey || e.evt.ctrlKey || e.evt.metaKey;
 
-          const stage = e.target.getStage();
-          const pos = stage.getPointerPosition();
+    if (!isMultiSelect) {
+      setSelectedIds([id]);
+    } else {
+      setSelectedIds(prev =>
+        prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
+      );
+    }
+    setSelectedShapeId(id);
+  };
 
-          const newShape = {
-              id: uuidv4(),
-              x: pos.x,
-              y: pos.y,
-              type: selectedTool,
-              fill: selectedColor,
-              isPrivate: isPrivateMode,
-              isLocked: false,
-              lockedBy: null,
-          };
-
-          if (isPrivateMode) {
-              setPrivateShapes(prev => [...prev, newShape]);
-          } else {
-              setShapes(prev => [...prev, newShape]);
-              sendMessage({ type: 'ADD_SHAPE', shape: newShape });
-          }
+  const handleDragStart = (e, shape) => {
+    const id = shape.id;
+    
+    // Check if someone else is dragging via awareness
+    const states = awarenessRef.current.getStates();
+    let isDraggingByOther = false;
+    states.forEach((state) => {
+      if (state.user && state.user.id !== userRef.current.id && state.dragging === id) {
+        isDraggingByOther = true;
       }
+    });
+
+    if (isDraggingByOther) {
+      e.currentTarget.stopDrag();
+      return;
+    }
+
+    // Set dragging in awareness
+    const localState = awarenessRef.current.getLocalState();
+    awarenessRef.current.setLocalState({
+      ...localState,
+      dragging: id,
+    });
+
+    if (!selectedIds.includes(id)) {
+      setSelectedIds([id]);
+    }
+  };
+
+  const handleDragMove = (e, shape) => {
+    const now = Date.now();
+    if (now - lastShapeUpdateRef.current < SHAPE_THROTTLE_MS) {
+      return;
+    }
+    lastShapeUpdateRef.current = now;
+
+    const id = shape.id;
+    const newX = e.target.x();
+    const newY = e.target.y();
+
+    if (shape.isPrivate) {
+      setPrivateShapes(prev =>
+        prev.map(s => (s.id === id ? { ...s, x: newX, y: newY } : s))
+      );
+    } else {
+      const shapeData = shapesMapRef.current.get(id);
+      if (shapeData) {
+        shapesMapRef.current.set(id, { ...shapeData, x: newX, y: newY });
+      }
+    }
+  };
+
+  const handleDragEnd = () => {
+    // Release drag lock
+    const localState = awarenessRef.current.getLocalState();
+    awarenessRef.current.setLocalState({
+      ...localState,
+      dragging: null,
+    });
   };
 
   const handleDelete = (id, isPrivate) => {
-      if (isPrivate) {
-          const idsToDelete = selectedIds.length > 0 && selectedIds.includes(id) 
-              ? selectedIds 
-              : [id];
-          setPrivateShapes(prev => prev.filter(s => !idsToDelete.includes(s.id)));
-          setSelectedIds([]);
-      } else {
-          const idsToDelete = selectedIds.length > 0 && selectedIds.includes(id) 
-              ? selectedIds 
-              : [id];
-          setShapes(prev => prev.filter(s => !idsToDelete.includes(s.id)));
-          idsToDelete.forEach(deleteId => {
-              sendMessage({ type: 'DELETE_SHAPE', id: deleteId });
-          });
-          setSelectedIds([]);
-      }
+    if (isPrivate) {
+      setPrivateShapes(prev => prev.filter(s => s.id !== id));
+    } else {
+      shapesMapRef.current.delete(id);
+    }
+    setSelectedIds(prev => prev.filter(i => i !== id));
+    setSelectedShapeId(null);
   };
 
   const handleClearAll = () => {
     if (isPrivateMode) {
-      // In private mode, only clear private shapes
       setPrivateShapes([]);
     } else {
-      // In public mode, clear everything
-      if (shapes.length > 0) {
-        setShapes([]);
-        sendMessage({ type: 'CLEAR_ALL' });
-      }
-      if (privateShapes.length > 0) {
-        setPrivateShapes([]);
-      }
+      shapesMapRef.current.clear();
     }
+    setSelectedIds([]);
+    setSelectedShapeId(null);
   };
 
-  const handleDragEnd = (e, shape) => {
-    const node = e.target;
-
-    if (shape.isPrivate) {
-        setPrivateShapes(prev =>
-            prev.map(s => s.id === shape.id 
-                ? { ...s, x: node.x(), y: node.y() } 
-                : s
-            )
-        );
-    } else {
-        // Update local state for all selected shapes
-        const idsToUpdate = selectedIds.includes(shape.id) ? selectedIds : [shape.id];
-        setShapes(prev => prev.map(s => {
-            if (idsToUpdate.includes(s.id)) {
-                const ref = shapeRefs.current[s.id];
-                return ref ? { ...s, x: ref.x(), y: ref.y() } : s;
-            }
-            return s;
-        }));
-
-        if (selectedIds.includes(shape.id)) {
-            selectedIds.forEach(id => {
-                const s = shapes.find(sh => sh.id === id);
-                const ref = shapeRefs.current[id];
-                if (s && ref) {
-                    const updatedShape = { ...s, x: ref.x(), y: ref.y() };
-                    sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
-                }
-            });
-
-            // Unlock all selected shapes
-            sendMessage({ 
-                type: 'UNLOCK_GROUP_REQUEST', 
-                shapeIds: selectedIds 
-            });
-        } else {
-            sendMessage({ 
-                type: 'UPDATE_SHAPE', 
-                shape: { ...shape, x: node.x(), y: node.y() } 
-            });
-            sendMessage({ type: 'UNLOCK_REQUEST', shapeId: shape.id });
-        }
-    }
-};
-
-  const handleDragMove = (e, shape) => {
-      const node = e.target;
-      const dx = node.x() - shape.x;
-      const dy = node.y() - shape.y;
-
-      if (shape.isPrivate) {
-          setPrivateShapes(prev =>
-              prev.map(s => s.id === shape.id 
-                  ? { ...s, x: node.x(), y: node.y() } 
-                  : s
-              )
-          );
-      } else {
-          // Move all selected shapes together
-          if (selectedIds.includes(shape.id) && selectedIds.length > 1) {
-              // Direct node manipulation for performance
-              selectedIds.forEach(id => {
-                  if (id !== shape.id) {
-                      const otherNode = shapeRefs.current[id];
-                      const otherShape = shapes.find(s => s.id === id);
-                      if (otherNode && otherShape) {
-                          otherNode.x(otherShape.x + dx);
-                          otherNode.y(otherShape.y + dy);
-                      }
-                  }
-              });
-
-              // Throttled network update for all selected shapes
-              const now = Date.now();
-              if (now - lastShapeUpdateRef.current >= SHAPE_THROTTLE_MS) {
-                  lastShapeUpdateRef.current = now;
-                  selectedIds.forEach(id => {
-                      const s = shapes.find(sh => sh.id === id);
-                      const n = shapeRefs.current[id];
-                      if (s && n) {
-                          const updatedShape = { ...s, x: n.x(), y: n.y() };
-                          sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
-                      }
-                  });
-              }
-          } else {
-              // Single shape movement
-              const now = Date.now();
-              if (now - lastShapeUpdateRef.current >= SHAPE_THROTTLE_MS) {
-                  lastShapeUpdateRef.current = now;
-                  sendMessage({ 
-                      type: 'UPDATE_SHAPE', 
-                      shape: { ...shape, x: node.x(), y: node.y() } 
-                  });
-              }
-        }
-    }
-  };
-
-  const handleDragStart = (e, shape) => {
-    const isLockedByOther = shape.isLocked && shape.lockedBy !== userRef.current.id;
-
-    if (isLockedByOther) {
-        e.target.stopDrag();
-        return;
-    }
-
-    // If dragging a selected shape, lock all selected shapes
-    if (selectedIds.includes(shape.id)) {
-        if (!shape.isPrivate) {
-            sendMessage({ 
-                type: 'LOCK_GROUP_REQUEST', 
-                shapeIds: selectedIds 
-            });
-        }
-    } else {
-        // If dragging unselected shape, select it and lock only it
-        setSelectedIds([shape.id]);
-        if (!shape.isPrivate) {
-            sendMessage({ type: 'LOCK_REQUEST', shapeId: shape.id });
-        }
-    }
-  };
-  
   const handlePrivateModeToggle = () => {
     if (!isPrivateMode) {
       setShowPrivateConfirmation(true);
     } else {
-      const sharedShapes = privateShapes.map(s => ({ ...s, isPrivate: false }));
-      setShapes(prev => [...prev, ...sharedShapes]);
-      setIsPrivateMode(false);
-      // Clear the cursor from other screens when leaving private mode
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'PRIVATE_MODE_CHANGED',
-          isPrivateMode: false,
-        }));
+      // Exiting private mode - share private shapes
+      if (privateShapes.length > 0) {
+        privateShapes.forEach(shape => {
+          const sharedShape = { ...shape, isPrivate: false };
+          shapesMapRef.current.set(shape.id, sharedShape);
+        });
+        setPrivateShapes([]);
       }
-      let tempShapes = privateShapes;
-      setPrivateShapes([]);
-      sharedShapes.forEach(shape => {
-        sendMessage({ type: 'ADD_SHAPE', shape });
-      });
+
       setIsPrivateMode(false);
+      const localState = awarenessRef.current.getLocalState();
+      awarenessRef.current.setLocalState({
+        ...localState,
+        isPrivateMode: false,
+      });
     }
   };
 
   const confirmPrivateMode = () => {
     setIsPrivateMode(true);
-    setShowPrivateBanner(true);
+    const localState = awarenessRef.current.getLocalState();
+    awarenessRef.current.setLocalState({
+      ...localState,
+      isPrivateMode: true,
+    });
     setShowPrivateConfirmation(false);
-    // Notify server that user entered private mode
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({
-        type: 'PRIVATE_MODE_CHANGED',
-        isPrivateMode: true,
-      }));
+  };
+
+  const handleColorChange = (newColor) => {
+    setSelectedColor(newColor);
+    setShowColorPicker(false);
+    
+    // Change color of all selected shapes
+    if (selectedIds.length > 0) {
+      selectedIds.forEach(id => {
+        const shape = allShapes.find(s => s.id === id);
+        if (shape) {
+          if (shape.isPrivate) {
+            setPrivateShapes(prev =>
+              prev.map(s => (s.id === id ? { ...s, fill: newColor } : s))
+            );
+          } else {
+            const shapeData = shapesMapRef.current.get(id);
+            if (shapeData) {
+              shapesMapRef.current.set(id, { ...shapeData, fill: newColor });
+            }
+          }
+        }
+      });
     }
   };
 
-  const renderShape = (shape) => {
-    const isLockedByOther = shape.isLocked && shape.lockedBy !== userRef.current.id;
-    const isSelected = selectedIds.includes(shape.id); 
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.length > 0) {
+        e.preventDefault();
+        selectedIds.forEach(id => {
+          const shape = allShapes.find(s => s.id === id);
+          if (shape) {
+            handleDelete(id, shape.isPrivate);
+          }
+        });
+      }
+    };
 
-    const props = {
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [selectedIds]);
+
+  const renderShape = (shape) => {
+    const isSelected = selectedIds.includes(shape.id);
+    
+    // Check if being dragged by another user
+    let isDraggingByOther = false;
+    let draggingUserColor = null;
+    const states = awarenessRef.current?.getStates();
+    if (states) {
+      states.forEach((state) => {
+        if (state.user && state.user.id !== userRef.current.id && state.dragging === shape.id) {
+          isDraggingByOther = true;
+          draggingUserColor = state.user.color;
+        }
+      });
+    }
+
+    const shapeProps = {
       key: shape.id,
-      ref: (node) => {
-        if (node) shapeRefs.current[shape.id] = node;
-        else delete shapeRefs.current[shape.id];
-      },
+      id: shape.id,
       x: shape.x,
       y: shape.y,
       fill: shape.fill,
-      draggable: !isLockedByOther,
+      stroke: isDraggingByOther ? draggingUserColor : (isSelected ? '#0096FF' : '#000'),
+      strokeWidth: isDraggingByOther ? 3 : (isSelected ? 2 : 1),
+      draggable: !isDraggingByOther,
+      onClick: (e) => handleShapeClick(e, shape),
+      onTap: (e) => handleShapeClick(e, shape),
       onDragStart: (e) => handleDragStart(e, shape),
-      //remember to delete later
-      opacity: isLockedByOther ? 0.6 : 1,
       onDragMove: (e) => handleDragMove(e, shape),
-      onDragEnd: (e) => handleDragEnd(e, shape),
-      // onClick: () => setSelectedShapeId(shape.id),
-      onDblClick: () => setSelectedShapeId(shape.id),
-      onClick: (e) => {
-            e.cancelBubble = true;
-            if (isLockedByOther) return;
-
-            if (e.evt.shiftKey) {
-                // Shift+Click: Add/remove from selection
-                setSelectedIds(prev => 
-                    prev.includes(shape.id)
-                        ? prev.filter(id => id !== shape.id)
-                        : [...prev, shape.id]
-                );
-            } else {
-                // regular click
-                setSelectedIds([shape.id]);
-            }
-        },
-
-      // Add dashed stroke for private shapes to visually distinguish them
-      stroke: shape.isPrivate ? '#FF1493' : undefined,
-      strokeWidth: shape.isPrivate ? 3 : 0,
-      dash: shape.isPrivate ? [8, 4] : undefined,
+      onDragEnd: handleDragEnd,
+      ref: (node) => {
+        if (node) {
+          shapeRefs.current[shape.id] = node;
+        } else {
+          delete shapeRefs.current[shape.id];
+        }
+      },
     };
 
-    switch (shape.type) {
-      case 'circle':
-        return <Circle {...props} radius={40} />;
-      case 'rect':
-        return <Rect {...props} width={80} height={80} />;
-      case 'star':
-        return <Star {...props} numPoints={5} innerRadius={20} outerRadius={40} />;
-      default:
-        return null;
+    if (shape.type === 'circle') {
+      return <Circle {...shapeProps} radius={50} />;
+    } else if (shape.type === 'star') {
+      return <Star {...shapeProps} numPoints={5} innerRadius={20} outerRadius={40} />;
+    } else {
+      return <Rect {...shapeProps} width={100} height={100} />;
     }
   };
 
-  // Combine shared and private shapes for rendering
   const allShapes = [...shapes, ...privateShapes];
 
   const tools = [
-    { id: 'circle', icon: <CircleIcon />, label: 'Circle' },
-    { id: 'rect', icon: <RectIcon />, label: 'Rectangle' },
-    { id: 'star', icon: <StarIcon />, label: 'Star' },
+    { id: 'circle', label: 'Circle', icon: <CircleIcon /> },
+    { id: 'rectangle', label: 'Rectangle', icon: <RectIcon /> },
+    { id: 'star', label: 'Star', icon: <StarIcon /> },
   ];
 
   return (
-    <div className="app-container">
-      {/* Floating Toolbar */}
+    <div className="app">
+      {/* Connection Status */}
+      <div className={`connection-status ${isConnected ? 'connected' : 'disconnected'}`}>
+        {isConnected ? '● Connected' : '○ Connecting...'}
+      </div>
+
+      {/* Toolbar */}
       <div className="toolbar">
-        {/* Connection Status */}
         <div className="toolbar-section">
-          <div className={`connection-status ${isConnected ? 'connected' : 'disconnected'}`}>
-            <span className="status-dot"></span>
-            <span className="status-text">{isConnected ? 'Connected' : 'Disconnected'}</span>
-          </div>
+          <span className="section-label">Welcome, {userRef.current.nickname}!</span>
         </div>
 
         <div className="toolbar-divider"></div>
@@ -627,10 +541,7 @@ const shapeRefs = useRef({});
                     key={color}
                     className={`color-swatch ${selectedColor === color ? 'active' : ''}`}
                     style={{ backgroundColor: color }}
-                    onClick={() => {
-                      setSelectedColor(color);
-                      setShowColorPicker(false);
-                    }}
+                    onClick={() => handleColorChange(color)}
                   />
                 ))}
               </div>
