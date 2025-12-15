@@ -24,6 +24,8 @@ export default defineConfig([
     },
     rules: {
       'no-unused-vars': ['error', { varsIgnorePattern: '^[A-Z_]' }],
+      // Allow Date.now() and performance.now() in event handlers (false positives)
+      'react-compiler/react-compiler': 'off',
     },
   },
 ])

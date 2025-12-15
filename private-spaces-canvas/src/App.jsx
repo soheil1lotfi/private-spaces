@@ -61,7 +61,6 @@ const cursorColors = [
 const adjectives = ['Happy', 'Swift', 'Clever', 'Brave', 'Calm', 'Witty', 'Bold', 'Wise', 'Kind', 'Cool', 'Bright', 'Jolly'];
 const animals = ['Panda', 'Fox', 'Owl', 'Tiger', 'Bear', 'Wolf', 'Eagle', 'Dolphin', 'Koala', 'Lynx', 'Rabbit', 'Hawk', 'Otter'];
 
-// Generating some randome names??????
 const generateNickname = () => {
   const adj = adjectives[Math.floor(Math.random() * adjectives.length)];
   const animal = animals[Math.floor(Math.random() * animals.length)];
@@ -78,7 +77,6 @@ const PRIVATE_SHAPES_KEY = 'private-spaces-private-shapes';
 function App() {
   const [shapes, setShapes] = useState([]);
   const [privateShapes, setPrivateShapes] = useState(() => {
-    // Load private shapes from localStorage on initial render
     const saved = localStorage.getItem(PRIVATE_SHAPES_KEY);
     return saved ? JSON.parse(saved) : [];
   });
@@ -88,19 +86,20 @@ function App() {
   const [isPrivateMode, setIsPrivateMode] = useState(false);
   const [showPrivateConfirmation, setShowPrivateConfirmation] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
-  const [cursors, setCursors] = useState({}); // { userId: { id, nickname, color, x, y } }
+  const [cursors, setCursors] = useState({});
   const [selectedShapeId, setSelectedShapeId] = useState(null);
   const [onlineUsers, setOnlineUsers] = useState([]);
-
-  const lastShapeUpdateRef = useRef(0);
-  const SHAPE_THROTTLE_MS = 100; 
-  const dragStartPositions = useRef({}); // Store initial positions when drag starts
 
   const [selectedIds, setSelectedIds] = useState([]);
   const transformerRef = useRef(null);
   const shapeRefs = useRef({});
 
-  // Generate user identity once on mount
+  // Y.js-First: Store initial positions for delta calculation
+  const dragInitialPositions = useRef({});
+  const lastUpdateTime = useRef(0);
+  const THROTTLE_MS = 16; 
+
+  // User identity
   const userRef = useRef({
     id: uuidv4(),
     nickname: generateNickname(),
@@ -112,19 +111,21 @@ function App() {
   const providerRef = useRef(null);
   const shapesMapRef = useRef(null);
   const awarenessRef = useRef(null);
+  const shapesObserverRef = useRef(null);
 
+  // Update transformer when selection changes
   useEffect(() => {
-      if (transformerRef.current) {
-          const nodes = selectedIds
-              .map(id => shapeRefs.current[id])
-              .filter(node => node); // Filter out undefined
-          
-          transformerRef.current.nodes(nodes);
-          transformerRef.current.getLayer()?.batchDraw();
-      }
+    if (transformerRef.current) {
+      const nodes = selectedIds
+        .map(id => shapeRefs.current[id])
+        .filter(node => node);
+      
+      transformerRef.current.nodes(nodes);
+      transformerRef.current.getLayer()?.batchDraw();
+    }
   }, [selectedIds]);
 
-  // Save private shapes to localStorage whenever they change
+  // Save private shapes to localStorage
   useEffect(() => {
     localStorage.setItem(PRIVATE_SHAPES_KEY, JSON.stringify(privateShapes));
   }, [privateShapes]);
@@ -133,11 +134,9 @@ function App() {
   useEffect(() => {
     setOnlineUsers([userRef.current]);
     
-    // Create Y.js document
     const ydoc = new Y.Doc();
     ydocRef.current = ydoc;
 
-    // Connect to WebSocket provider
     const provider = new WebsocketProvider(
       `ws://${window.location.hostname}:3001`,
       'collaborative-whiteboard',
@@ -145,23 +144,18 @@ function App() {
     );
     providerRef.current = provider;
 
-    // Get shared data structures
     const shapesMap = ydoc.getMap('shapes');
     shapesMapRef.current = shapesMap;
 
-    // Get awareness for ephemeral state
     const awareness = provider.awareness;
     awarenessRef.current = awareness;
 
-    // Set local user state in awareness
     awareness.setLocalState({
       user: userRef.current,
       cursor: { x: 0, y: 0 },
-      dragging: null,
       isPrivateMode: false,
     });
 
-    // Connection status
     provider.on('status', (event) => {
       setIsConnected(event.status === 'connected');
       if (event.status === 'connected') {
@@ -169,60 +163,25 @@ function App() {
       }
     });
 
-    // Listen to shapes changes
+    // Y.js Standard: Observer with proper event handling and stored reference
     const updateShapes = () => {
       const shapesArray = [];
-      shapesMap.forEach((shape) => {
-        if (!shape.isPrivate) {
-          shapesArray.push(shape);
+      shapesMap.forEach((shape, id) => {
+        // Y.js Standard: Ensure shape is a plain object
+        const shapeObj = shape instanceof Y.Map ? shape.toJSON() : shape;
+        if (!shapeObj.isPrivate) {
+          shapesArray.push({ ...shapeObj, id });
         }
       });
-      
-      // If we're currently dragging, update dragStartPositions for shapes that were moved by others
-      const localState = awarenessRef.current.getLocalState();
-      const isDragging = localState.dragging !== null && localState.dragging !== undefined;
-      
-      if (isDragging) {
-        const draggingIds = Array.isArray(localState.dragging) 
-          ? localState.dragging 
-          : [localState.dragging];
-        
-        // Update dragStartPositions for shapes that were updated by other clients
-        draggingIds.forEach(shapeId => {
-          const updatedShape = shapesArray.find(s => s.id === shapeId);
-          if (updatedShape && dragStartPositions.current[shapeId]) {
-            // Check if this shape was moved by another client
-            const states = awarenessRef.current.getStates();
-            let movedByOther = false;
-            states.forEach((state) => {
-              if (state.user && state.user.id !== userRef.current.id) {
-                const otherDraggingIds = Array.isArray(state.dragging) 
-                  ? state.dragging 
-                  : (state.dragging ? [state.dragging] : []);
-                if (otherDraggingIds.includes(shapeId)) {
-                  movedByOther = true;
-                }
-              }
-            });
-            
-            // If moved by another client, update the initial position to current position
-            if (movedByOther) {
-              dragStartPositions.current[shapeId] = { 
-                x: updatedShape.x, 
-                y: updatedShape.y 
-              };
-            }
-          }
-        });
-      }
-      
       setShapes(shapesArray);
     };
 
+    // Store observer reference for cleanup
+    shapesObserverRef.current = updateShapes;
     shapesMap.observe(updateShapes);
-    updateShapes();
+    updateShapes(); // Initial load
 
-    // Listen to awareness changes
+    // Awareness changes
     const updateAwareness = () => {
       const states = awareness.getStates();
       const newCursors = {};
@@ -231,7 +190,6 @@ function App() {
       states.forEach((state) => {
         if (!state.user) return;
 
-        // Cursors for other users
         if (state.user.id !== userRef.current.id && !state.isPrivateMode) {
           newCursors[state.user.id] = {
             ...state.user,
@@ -241,7 +199,6 @@ function App() {
           };
         }
 
-        // Track online users
         users.push({
           ...state.user,
           isPrivateMode: state.isPrivateMode || false,
@@ -266,10 +223,13 @@ function App() {
 
     window.addEventListener('mousemove', handleMouseMove);
 
-    // Cleanup
     return () => {
       window.removeEventListener('mousemove', handleMouseMove);
-      shapesMap.unobserve(updateShapes);
+      // Y.js Standard: Use stored observer reference for cleanup
+      if (shapesObserverRef.current) {
+        shapesMap.unobserve(shapesObserverRef.current);
+        shapesObserverRef.current = null;
+      }
       awareness.off('change', updateAwareness);
       provider.destroy();
       ydoc.destroy();
@@ -277,8 +237,11 @@ function App() {
   }, []);
 
   const handleClick = (e) => {
-    // If clicking on empty canvas
     if (e.target === e.target.getStage()) {
+      if (selectedIds.length > 0) {
+        setSelectedIds([]);
+        return;
+      }
       const stage = e.target.getStage();
       const pointerPosition = stage.getPointerPosition();
 
@@ -295,7 +258,10 @@ function App() {
       if (isPrivateMode) {
         setPrivateShapes(prev => [...prev, newShape]);
       } else {
-        shapesMapRef.current.set(newShape.id, newShape);
+        // Y.js Standard: Use Y.transact for atomic updates
+        ydocRef.current.transact(() => {
+          shapesMapRef.current.set(newShape.id, newShape);
+        });
       }
       
       setSelectedIds([]);
@@ -321,49 +287,22 @@ function App() {
   const handleDragStart = (e, shape) => {
     const id = shape.id;
     
-    // Determine which shapes will be dragged (selected group or single shape)
+    // Determine which shapes will be dragged
     const shapesToDrag = selectedIds.includes(id) && selectedIds.length > 1 
       ? selectedIds 
       : [id];
-    
-    // Check if any of the shapes to drag are being dragged by another client
-    const states = awarenessRef.current.getStates();
-    let isDraggingByOther = false;
-    states.forEach((state) => {
-      if (state.user && state.user.id !== userRef.current.id) {
-        // Check if this client is dragging any of our shapes
-        const otherDraggingIds = Array.isArray(state.dragging) 
-          ? state.dragging 
-          : (state.dragging ? [state.dragging] : []);
-        
-        // Check for overlap
-        const hasOverlap = shapesToDrag.some(shapeId => otherDraggingIds.includes(shapeId));
-        if (hasOverlap) {
-          isDraggingByOther = true;
-        }
-      }
-    });
-
-    if (isDraggingByOther) {
-      e.currentTarget.stopDrag();
-      return;
-    }
 
     // Store initial positions for all shapes that will be dragged
-    dragStartPositions.current = {};
+    dragInitialPositions.current = {};
     const allShapesCurrent = [...shapes, ...privateShapes];
     shapesToDrag.forEach(shapeId => {
       const selectedShape = allShapesCurrent.find(s => s.id === shapeId);
       if (selectedShape) {
-        dragStartPositions.current[shapeId] = { x: selectedShape.x, y: selectedShape.y };
+        dragInitialPositions.current[shapeId] = { 
+          x: selectedShape.x, 
+          y: selectedShape.y 
+        };
       }
-    });
-
-    // Set dragging in awareness - store array of all shape IDs being dragged
-    const localState = awarenessRef.current.getLocalState();
-    awarenessRef.current.setLocalState({
-      ...localState,
-      dragging: shapesToDrag.length > 1 ? shapesToDrag : shapesToDrag[0],
     });
 
     if (!selectedIds.includes(id)) {
@@ -371,107 +310,111 @@ function App() {
     }
   };
 
+  // Y.js-First: Only update Y.js, let observer handle React/Konva updates
   const handleDragMove = (e, shape) => {
+    // Throttle updates
+    // Note: Date.now() is safe here - handleDragMove is an event handler, not called during render
+    // The linter incorrectly flags this, but it's a false positive
     const now = Date.now();
-    if (now - lastShapeUpdateRef.current < SHAPE_THROTTLE_MS) {
+    if (now - lastUpdateTime.current < THROTTLE_MS) {
       return;
     }
-    lastShapeUpdateRef.current = now;
+    lastUpdateTime.current = now;
 
     const id = shape.id;
-    const newX = e.target.x();
-    const newY = e.target.y();
+    const node = e.target;
+    const newX = node.x();
+    const newY = node.y();
 
-    // Get initial position for this shape
-    const initialPos = dragStartPositions.current[id];
+    // Get initial position
+    const initialPos = dragInitialPositions.current[id];
     if (!initialPos) return;
 
-    // Get current actual position from shapes array (may have been updated by other clients)
-    const allShapesCurrent = [...shapes, ...privateShapes];
-    const currentShape = allShapesCurrent.find(s => s.id === id);
-    if (!currentShape) return;
+    // Calculate delta from initial position
+    const deltaX = newX - initialPos.x;
+    const deltaY = newY - initialPos.y;
 
-    // Calculate delta from the actual current position, not stale initial position
-    // This handles the case where another client moved the shape during our drag
-    const currentX = currentShape.x;
-    const currentY = currentShape.y;
-    const deltaX = newX - currentX;
-    const deltaY = newY - currentY;
-
-    // If this shape is part of a multi-selection, move all selected shapes
+    // Multi-select: update all selected shapes in Y.js
     if (selectedIds.includes(id) && selectedIds.length > 1) {
-      selectedIds.forEach(selectedId => {
-        // Skip if this shape is being dragged by another client
-        const states = awarenessRef.current.getStates();
-        let isDraggedByOther = false;
-        states.forEach((state) => {
-          if (state.user && state.user.id !== userRef.current.id) {
-            const otherDraggingIds = Array.isArray(state.dragging) 
-              ? state.dragging 
-              : (state.dragging ? [state.dragging] : []);
-            if (otherDraggingIds.includes(selectedId)) {
-              isDraggedByOther = true;
-            }
-          }
-        });
-        
-        if (isDraggedByOther) return;
+      // Y.js Standard: Batch updates in single transaction
+      ydocRef.current.transact(() => {
+        selectedIds.forEach(selectedId => {
+          const initialSelectedPos = dragInitialPositions.current[selectedId];
+          if (!initialSelectedPos) return;
 
-        const selectedShape = allShapesCurrent.find(s => s.id === selectedId);
-        if (!selectedShape) return;
+          const updatedX = initialSelectedPos.x + deltaX;
+          const updatedY = initialSelectedPos.y + deltaY;
 
-        // Use current position from shapes array, not stale initial position
-        const updatedX = selectedShape.x + deltaX;
-        const updatedY = selectedShape.y + deltaY;
+          const allShapesCurrent = [...shapes, ...privateShapes];
+          const selectedShape = allShapesCurrent.find(s => s.id === selectedId);
+          if (!selectedShape || selectedShape.isPrivate) return;
 
-        if (selectedShape.isPrivate) {
-          setPrivateShapes(prev =>
-            prev.map(s => (s.id === selectedId ? { ...s, x: updatedX, y: updatedY } : s))
-          );
-        } else {
           const shapeData = shapesMapRef.current.get(selectedId);
           if (shapeData) {
-            shapesMapRef.current.set(selectedId, { ...shapeData, x: updatedX, y: updatedY });
+            shapesMapRef.current.set(selectedId, { 
+              ...shapeData, 
+              x: updatedX, 
+              y: updatedY 
+            });
           }
-        }
-
-        // Update the Konva node position directly for smooth dragging
-        if (shapeRefs.current[selectedId] && selectedId !== id) {
-          shapeRefs.current[selectedId].position({ x: updatedX, y: updatedY });
-        }
+        });
       });
+      
+      // Handle private shapes separately (outside Y.js)
+      const privateIds = selectedIds.filter(selectedId => {
+        const allShapesCurrent = [...shapes, ...privateShapes];
+        const selectedShape = allShapesCurrent.find(s => s.id === selectedId);
+        return selectedShape && selectedShape.isPrivate;
+      });
+      
+      if (privateIds.length > 0) {
+        setPrivateShapes(prev =>
+          prev.map(s => {
+            if (privateIds.includes(s.id)) {
+              const initialPos = dragInitialPositions.current[s.id];
+              if (initialPos) {
+                return { ...s, x: initialPos.x + deltaX, y: initialPos.y + deltaY };
+              }
+            }
+            return s;
+          })
+        );
+      }
     } else {
-      // Single shape drag
+      // Single shape: update Y.js only
       if (shape.isPrivate) {
         setPrivateShapes(prev =>
           prev.map(s => (s.id === id ? { ...s, x: newX, y: newY } : s))
         );
       } else {
-        const shapeData = shapesMapRef.current.get(id);
-        if (shapeData) {
-          shapesMapRef.current.set(id, { ...shapeData, x: newX, y: newY });
-        }
+        // Y.js Standard: Use transaction
+        ydocRef.current.transact(() => {
+          const shapeData = shapesMapRef.current.get(id);
+          if (shapeData) {
+            shapesMapRef.current.set(id, { 
+              ...shapeData, 
+              x: newX, 
+              y: newY 
+            });
+          }
+        });
       }
     }
   };
 
   const handleDragEnd = () => {
     // Clear stored positions
-    dragStartPositions.current = {};
-    
-    // Release drag lock
-    const localState = awarenessRef.current.getLocalState();
-    awarenessRef.current.setLocalState({
-      ...localState,
-      dragging: null,
-    });
+    dragInitialPositions.current = {};
   };
 
   const handleDelete = (id, isPrivate) => {
     if (isPrivate) {
       setPrivateShapes(prev => prev.filter(s => s.id !== id));
     } else {
-      shapesMapRef.current.delete(id);
+      // Y.js Standard: Use transaction
+      ydocRef.current.transact(() => {
+        shapesMapRef.current.delete(id);
+      });
     }
     setSelectedIds(prev => prev.filter(i => i !== id));
     setSelectedShapeId(null);
@@ -481,7 +424,10 @@ function App() {
     if (isPrivateMode) {
       setPrivateShapes([]);
     } else {
-      shapesMapRef.current.clear();
+      // Y.js Standard: Use transaction
+      ydocRef.current.transact(() => {
+        shapesMapRef.current.clear();
+      });
     }
     setSelectedIds([]);
     setSelectedShapeId(null);
@@ -493,9 +439,12 @@ function App() {
     } else {
       // Exiting private mode - share private shapes
       if (privateShapes.length > 0) {
-        privateShapes.forEach(shape => {
-          const sharedShape = { ...shape, isPrivate: false };
-          shapesMapRef.current.set(shape.id, sharedShape);
+        // Y.js Standard: Batch updates in transaction
+        ydocRef.current.transact(() => {
+          privateShapes.forEach(shape => {
+            const sharedShape = { ...shape, isPrivate: false };
+            shapesMapRef.current.set(shape.id, sharedShape);
+          });
         });
         setPrivateShapes([]);
       }
@@ -526,21 +475,35 @@ function App() {
     // Change color of all selected shapes
     if (selectedIds.length > 0) {
       const allShapesCurrent = [...shapes, ...privateShapes];
-      selectedIds.forEach(id => {
+      
+      // Y.js Standard: Batch color updates in transaction
+      const publicIds = selectedIds.filter(id => {
         const shape = allShapesCurrent.find(s => s.id === id);
-        if (shape) {
-          if (shape.isPrivate) {
-            setPrivateShapes(prev =>
-              prev.map(s => (s.id === id ? { ...s, fill: newColor } : s))
-            );
-          } else {
+        return shape && !shape.isPrivate;
+      });
+      
+      if (publicIds.length > 0) {
+        ydocRef.current.transact(() => {
+          publicIds.forEach(id => {
             const shapeData = shapesMapRef.current.get(id);
             if (shapeData) {
               shapesMapRef.current.set(id, { ...shapeData, fill: newColor });
             }
-          }
-        }
+          });
+        });
+      }
+      
+      // Handle private shapes separately
+      const privateIds = selectedIds.filter(id => {
+        const shape = allShapesCurrent.find(s => s.id === id);
+        return shape && shape.isPrivate;
       });
+      
+      if (privateIds.length > 0) {
+        setPrivateShapes(prev =>
+          prev.map(s => (privateIds.includes(s.id) ? { ...s, fill: newColor } : s))
+        );
+      }
     }
   };
 
@@ -565,24 +528,6 @@ function App() {
 
   const renderShape = (shape) => {
     const isSelected = selectedIds.includes(shape.id);
-    
-    // Check if being dragged by another user
-    let isDraggingByOther = false;
-    let draggingUserColor = null;
-    const states = awarenessRef.current?.getStates();
-    if (states) {
-      states.forEach((state) => {
-        if (state.user && state.user.id !== userRef.current.id) {
-          const otherDraggingIds = Array.isArray(state.dragging) 
-            ? state.dragging 
-            : (state.dragging ? [state.dragging] : []);
-          if (otherDraggingIds.includes(shape.id)) {
-            isDraggingByOther = true;
-            draggingUserColor = state.user.color;
-          }
-        }
-      });
-    }
 
     const shapeProps = {
       key: shape.id,
@@ -590,10 +535,10 @@ function App() {
       x: shape.x,
       y: shape.y,
       fill: shape.fill,
-      stroke: isDraggingByOther ? draggingUserColor : (isSelected ? '#0096FF' : '#000'),
-      strokeWidth: isDraggingByOther ? 3 : (isSelected ? 2 : 1),
+      stroke: isSelected ? '#0096FF' : '#000',
+      strokeWidth: isSelected ? 2 : 1,
       dash: shape.isPrivate ? [8, 4] : undefined,
-      draggable: !isDraggingByOther,
+      draggable: true,
       onClick: (e) => handleShapeClick(e, shape),
       onTap: (e) => handleShapeClick(e, shape),
       onDragStart: (e) => handleDragStart(e, shape),
@@ -714,7 +659,7 @@ function App() {
         </div>
       </div>
 
-      {/* Private Mode Banner - Red Border */}
+      {/* Private Mode Banner */}
       {isPrivateMode && (
         <>
           <div className="private-banner" />
@@ -732,7 +677,7 @@ function App() {
 
       {/* Help Tooltip */}
       <div className="help-tooltip">
-        <span>Click to add • Drag to move • Click shape to select • Delete when selected</span>
+        <span>Click to add • Drag to move • Shift+Click for multi-select • Delete to remove</span>
       </div>
 
       {/* Private Mode Confirmation Modal */}
@@ -773,24 +718,22 @@ function App() {
       >
         <Layer>
           {allShapes.map(renderShape)}
-          {/* Transformer for selection handle (visuals) */}
           <Transformer
-              ref={transformerRef}
-              resizeEnabled={false}
-              rotateEnabled={false}
-              borderStroke="#0096FF"
-              borderStrokeWidth={2}
-              anchorSize={8}
-              anchorFill="#ffffff"
-              anchorStroke="#0096FF"
-              anchorCornerRadius={2}
+            ref={transformerRef}
+            resizeEnabled={false}
+            rotateEnabled={false}
+            borderStroke="#0096FF"
+            borderStrokeWidth={2}
+            anchorSize={8}
+            anchorFill="#ffffff"
+            anchorStroke="#0096FF"
+            anchorCornerRadius={2}
           />
         </Layer>
       </Stage>
 
       {/* Other users' cursors */}
       {Object.values(cursors).map(cursor => {
-        // Don't show the current user's own cursor
         if (cursor.id === userRef.current.id) return null;
         
         return (

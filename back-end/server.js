@@ -4,10 +4,7 @@ const http = require("http");
 const { WebSocketServer } = require("ws");
 const mongoose = require("mongoose");
 const Y = require("yjs");
-const awarenessProtocol = require("y-protocols/awareness");
-const syncProtocol = require("y-protocols/sync");
-const encoding = require("lib0/encoding");
-const decoding = require("lib0/decoding");
+const { setupWSConnection } = require('y-websocket/bin/utils');
 
 const app = express();
 
@@ -34,39 +31,13 @@ mongoose
 const wss = new WebSocketServer({ server });
 
 // Store Y.js documents
-const docs = new Map(); // docName -> { doc: Y.Doc, awareness: Awareness, connections: Set }
-
-const messageSync = 0;
-const messageAwareness = 1;
+const docs = new Map(); // docName -> Y.Doc
 
 // Get or create Y.js document
 function getYDoc(docName) {
   if (!docs.has(docName)) {
     const doc = new Y.Doc();
-    const awareness = new awarenessProtocol.Awareness(doc);
-
-    docs.set(docName, {
-      doc,
-      awareness,
-      connections: new Set(),
-    });
-
-    // Broadcast updates to all connected clients
-    doc.on("update", (update, origin) => {
-      const encoder = encoding.createEncoder();
-      encoding.writeVarUint(encoder, messageSync);
-      syncProtocol.writeUpdate(encoder, update);
-      const message = encoding.toUint8Array(encoder);
-
-      const docData = docs.get(docName);
-      if (docData) {
-        docData.connections.forEach((client) => {
-          if (client !== origin && client.readyState === 1) {
-            client.send(message);
-          }
-        });
-      }
-    });
+    docs.set(docName, doc);
 
     // Load from MongoDB on first access
     loadDocumentFromDB(docName, doc);
@@ -84,16 +55,19 @@ async function loadDocumentFromDB(docName, ydoc) {
     const dbShapes = await Shape.find();
 
     if (dbShapes.length > 0) {
-      const shapesMap = ydoc.getMap("shapes");
-      dbShapes.forEach((shape) => {
-        shapesMap.set(shape.id, {
-          id: shape.id,
-          x: shape.x,
-          y: shape.y,
-          type: shape.type,
-          fill: shape.fill,
-          isPrivate: shape.isPrivate || false,
-          isLocked: shape.isLocked || false,
+      // Y.js Standard: Load within transaction
+      ydoc.transact(() => {
+        const shapesMap = ydoc.getMap("shapes");
+        dbShapes.forEach((shape) => {
+          shapesMap.set(shape.id, {
+            id: shape.id,
+            x: shape.x,
+            y: shape.y,
+            type: shape.type,
+            fill: shape.fill,
+            isPrivate: shape.isPrivate || false,
+            isLocked: shape.isLocked || false,
+          });
         });
       });
       console.log(`Loaded ${dbShapes.length} shapes from MongoDB`);
@@ -122,18 +96,21 @@ function setupPersistence(docName, ydoc) {
       await Shape.deleteMany({});
 
       const shapes = [];
-      shapesMap.forEach((shape) => {
-        if (!shape.isPrivate) {
-          shapes.push({
-            id: shape.id,
-            x: shape.x,
-            y: shape.y,
-            type: shape.type,
-            fill: shape.fill,
-            isPrivate: shape.isPrivate || false,
-            isLocked: shape.isLocked || false,
-          });
-        }
+      // Y.js Standard: Read within transaction context
+      ydoc.transact(() => {
+        shapesMap.forEach((shape) => {
+          if (!shape.isPrivate) {
+            shapes.push({
+              id: shape.id,
+              x: shape.x,
+              y: shape.y,
+              type: shape.type,
+              fill: shape.fill,
+              isPrivate: shape.isPrivate || false,
+              isLocked: shape.isLocked || false,
+            });
+          }
+        });
       });
 
       if (shapes.length > 0) {
@@ -146,79 +123,15 @@ function setupPersistence(docName, ydoc) {
   }, 5000);
 }
 
-wss.on("connection", (ws) => {
+// Y.js Standard: Use y-websocket's setupWSConnection
+wss.on("connection", (ws, req) => {
   console.log("New Y.js client connected");
 
-  const docName = "collaborative-whiteboard";
-  const { doc, awareness, connections } = getYDoc(docName);
+  const docName = req.url.slice(1).split('?')[0] || 'collaborative-whiteboard';
+  const doc = getYDoc(docName);
 
-  connections.add(ws);
-
-  // Send sync step 1
-  const encoderSync = encoding.createEncoder();
-  encoding.writeVarUint(encoderSync, messageSync);
-  syncProtocol.writeSyncStep1(encoderSync, doc);
-  ws.send(encoding.toUint8Array(encoderSync));
-
-  // Send awareness states
-  const encoderAwareness = encoding.createEncoder();
-  encoding.writeVarUint(encoderAwareness, messageAwareness);
-  encoding.writeVarUint8Array(
-    encoderAwareness,
-    awarenessProtocol.encodeAwarenessUpdate(
-      awareness,
-      Array.from(awareness.getStates().keys())
-    )
-  );
-  ws.send(encoding.toUint8Array(encoderAwareness));
-
-  ws.on("message", (message) => {
-    try {
-      const uint8Array = new Uint8Array(message);
-      const decoder = decoding.createDecoder(uint8Array);
-      const messageType = decoding.readVarUint(decoder);
-
-      if (messageType === messageSync) {
-        // Handle sync message
-        const encoder = encoding.createEncoder();
-        encoding.writeVarUint(encoder, messageSync);
-        syncProtocol.readSyncMessage(decoder, encoder, doc, ws);
-
-        // Send reply to the sender (if any)
-        if (encoding.length(encoder) > 1) {
-          ws.send(encoding.toUint8Array(encoder));
-        }
-      } else if (messageType === messageAwareness) {
-        // Handle awareness message
-        awarenessProtocol.applyAwarenessUpdate(
-          awareness,
-          decoding.readVarUint8Array(decoder),
-          ws
-        );
-
-        // Broadcast to other clients
-        connections.forEach((client) => {
-          if (client !== ws && client.readyState === 1) {
-            client.send(uint8Array);
-          }
-        });
-      }
-    } catch (error) {
-      console.error("Error handling message:", error);
-    }
-  });
-
-  ws.on("close", () => {
-    console.log("Y.js client disconnected");
-    connections.delete(ws);
-
-    // Remove from awareness
-    awarenessProtocol.removeAwarenessStates(awareness, [ws], null);
-  });
-
-  ws.on("error", (error) => {
-    console.error("WebSocket error:", error);
-  });
+  // This handles all protocol correctly!
+  setupWSConnection(ws, req, doc);
 });
 
 console.log("Y.js WebSocket server initialized");

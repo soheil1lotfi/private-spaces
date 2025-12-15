@@ -14,7 +14,8 @@
     "mongoose": "^7.5.0",
     "yjs": "^13.6.10",
     "y-protocols": "^1.0.6",
-    "lib0": "^0.2.94"
+    "lib0": "^0.2.94",
+    "y-websocket": "^1.5.0"
   },
   "devDependencies": {
     "nodemon": "^3.0.1"
