@@ -345,18 +345,16 @@ function App() {
           const updatedX = initialSelectedPos.x + deltaX;
           const updatedY = initialSelectedPos.y + deltaY;
 
-          const allShapesCurrent = [...shapes, ...privateShapes];
-          const selectedShape = allShapesCurrent.find(s => s.id === selectedId);
-          if (!selectedShape || selectedShape.isPrivate) return;
-
+          // Read directly from Y.js Map (not React state) to get latest data
           const shapeData = shapesMapRef.current.get(selectedId);
-          if (shapeData) {
-            shapesMapRef.current.set(selectedId, { 
-              ...shapeData, 
-              x: updatedX, 
-              y: updatedY 
-            });
-          }
+          if (!shapeData || shapeData.isPrivate) return;
+
+          // Merge with existing data to preserve all properties (like fill/color)
+          shapesMapRef.current.set(selectedId, { 
+            ...shapeData, 
+            x: updatedX, 
+            y: updatedY 
+          });
         });
       });
       
@@ -388,9 +386,11 @@ function App() {
         );
       } else {
         // Y.js Standard: Use transaction
+        // Read fresh data from Y.js Map to preserve concurrent updates (like color changes)
         ydocRef.current.transact(() => {
           const shapeData = shapesMapRef.current.get(id);
           if (shapeData) {
+            // Merge with existing data to preserve all properties (like fill/color)
             shapesMapRef.current.set(id, { 
               ...shapeData, 
               x: newX, 
@@ -474,26 +474,21 @@ function App() {
     
     // Change color of all selected shapes
     if (selectedIds.length > 0) {
-      const allShapesCurrent = [...shapes, ...privateShapes];
-      
       // Y.js Standard: Batch color updates in transaction
-      const publicIds = selectedIds.filter(id => {
-        const shape = allShapesCurrent.find(s => s.id === id);
-        return shape && !shape.isPrivate;
+      // Read directly from Y.js Map (not React state) to get latest data
+      // This ensures we have the most recent position updates from other clients
+      ydocRef.current.transact(() => {
+        selectedIds.forEach(id => {
+          const shapeData = shapesMapRef.current.get(id);
+          if (shapeData && !shapeData.isPrivate) {
+            // Merge with existing data to preserve all properties (like x, y position)
+            shapesMapRef.current.set(id, { ...shapeData, fill: newColor });
+          }
+        });
       });
       
-      if (publicIds.length > 0) {
-        ydocRef.current.transact(() => {
-          publicIds.forEach(id => {
-            const shapeData = shapesMapRef.current.get(id);
-            if (shapeData) {
-              shapesMapRef.current.set(id, { ...shapeData, fill: newColor });
-            }
-          });
-        });
-      }
-      
-      // Handle private shapes separately
+      // Handle private shapes separately (from React state)
+      const allShapesCurrent = [...shapes, ...privateShapes];
       const privateIds = selectedIds.filter(id => {
         const shape = allShapesCurrent.find(s => s.id === id);
         return shape && shape.isPrivate;
