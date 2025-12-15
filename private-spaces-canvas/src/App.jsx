@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 import { Stage, Layer, Rect, Circle, Star, Transformer  } from 'react-konva';
 import { v4 as uuidv4 } from 'uuid';
@@ -280,11 +280,53 @@ const shapeRefs = useRef({});
     return () => window.removeEventListener('mousemove', handleMouseMove);
   }, [isPrivateMode]);
 
-  const sendMessage = (data) => {
+  const sendMessage = useCallback((data) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(data));
     }
-  };
+  }, []);
+
+  // Track previous color to only update when color actually changes
+  const prevColorRef = useRef(selectedColor);
+  
+  // Update color of selected shapes when color changes
+  useEffect(() => {
+    // Skip if no shapes are selected
+    if (selectedIds.length === 0) {
+      prevColorRef.current = selectedColor;
+      return;
+    }
+
+    // Skip if color hasn't changed
+    if (prevColorRef.current === selectedColor) {
+      return;
+    }
+
+    const allShapes = [...shapes, ...privateShapes];
+    const shapesToUpdate = allShapes.filter(s => selectedIds.includes(s.id));
+
+    if (shapesToUpdate.length === 0) {
+      prevColorRef.current = selectedColor;
+      return;
+    }
+
+    shapesToUpdate.forEach(shape => {
+      const updatedShape = { ...shape, fill: selectedColor };
+      
+      if (shape.isPrivate) {
+        setPrivateShapes(prev =>
+          prev.map(s => s.id === shape.id ? updatedShape : s)
+        );
+      } else {
+        setShapes(prev =>
+          prev.map(s => s.id === shape.id ? updatedShape : s)
+        );
+        sendMessage({ type: 'UPDATE_SHAPE', shape: updatedShape });
+      }
+    });
+
+    prevColorRef.current = selectedColor;
+  }, [selectedColor, selectedIds, shapes, privateShapes, sendMessage]);
 
   const handleClick = (e) => {
       if (e.target === e.target.getStage()) {
