@@ -86,7 +86,6 @@ function App() {
   const [selectedColor, setSelectedColor] = useState('#4ECDC4');
   const [isConnected, setIsConnected] = useState(false);
   const [isPrivateMode, setIsPrivateMode] = useState(false);
-  const [showPrivateBanner, setShowPrivateBanner] = useState(true);
   const [showPrivateConfirmation, setShowPrivateConfirmation] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [cursors, setCursors] = useState({}); // { userId: { id, nickname, color, x, y } }
@@ -178,6 +177,45 @@ function App() {
           shapesArray.push(shape);
         }
       });
+      
+      // If we're currently dragging, update dragStartPositions for shapes that were moved by others
+      const localState = awarenessRef.current.getLocalState();
+      const isDragging = localState.dragging !== null && localState.dragging !== undefined;
+      
+      if (isDragging) {
+        const draggingIds = Array.isArray(localState.dragging) 
+          ? localState.dragging 
+          : [localState.dragging];
+        
+        // Update dragStartPositions for shapes that were updated by other clients
+        draggingIds.forEach(shapeId => {
+          const updatedShape = shapesArray.find(s => s.id === shapeId);
+          if (updatedShape && dragStartPositions.current[shapeId]) {
+            // Check if this shape was moved by another client
+            const states = awarenessRef.current.getStates();
+            let movedByOther = false;
+            states.forEach((state) => {
+              if (state.user && state.user.id !== userRef.current.id) {
+                const otherDraggingIds = Array.isArray(state.dragging) 
+                  ? state.dragging 
+                  : (state.dragging ? [state.dragging] : []);
+                if (otherDraggingIds.includes(shapeId)) {
+                  movedByOther = true;
+                }
+              }
+            });
+            
+            // If moved by another client, update the initial position to current position
+            if (movedByOther) {
+              dragStartPositions.current[shapeId] = { 
+                x: updatedShape.x, 
+                y: updatedShape.y 
+              };
+            }
+          }
+        });
+      }
+      
       setShapes(shapesArray);
     };
 
@@ -283,12 +321,26 @@ function App() {
   const handleDragStart = (e, shape) => {
     const id = shape.id;
     
-    // Check if someone else is dragging via awareness
+    // Determine which shapes will be dragged (selected group or single shape)
+    const shapesToDrag = selectedIds.includes(id) && selectedIds.length > 1 
+      ? selectedIds 
+      : [id];
+    
+    // Check if any of the shapes to drag are being dragged by another client
     const states = awarenessRef.current.getStates();
     let isDraggingByOther = false;
     states.forEach((state) => {
-      if (state.user && state.user.id !== userRef.current.id && state.dragging === id) {
-        isDraggingByOther = true;
+      if (state.user && state.user.id !== userRef.current.id) {
+        // Check if this client is dragging any of our shapes
+        const otherDraggingIds = Array.isArray(state.dragging) 
+          ? state.dragging 
+          : (state.dragging ? [state.dragging] : []);
+        
+        // Check for overlap
+        const hasOverlap = shapesToDrag.some(shapeId => otherDraggingIds.includes(shapeId));
+        if (hasOverlap) {
+          isDraggingByOther = true;
+        }
       }
     });
 
@@ -297,24 +349,21 @@ function App() {
       return;
     }
 
-    // Store initial positions for all selected shapes
+    // Store initial positions for all shapes that will be dragged
     dragStartPositions.current = {};
-    if (selectedIds.includes(id)) {
-      selectedIds.forEach(selectedId => {
-        const selectedShape = allShapes.find(s => s.id === selectedId);
-        if (selectedShape) {
-          dragStartPositions.current[selectedId] = { x: selectedShape.x, y: selectedShape.y };
-        }
-      });
-    } else {
-      dragStartPositions.current[id] = { x: shape.x, y: shape.y };
-    }
+    const allShapesCurrent = [...shapes, ...privateShapes];
+    shapesToDrag.forEach(shapeId => {
+      const selectedShape = allShapesCurrent.find(s => s.id === shapeId);
+      if (selectedShape) {
+        dragStartPositions.current[shapeId] = { x: selectedShape.x, y: selectedShape.y };
+      }
+    });
 
-    // Set dragging in awareness
+    // Set dragging in awareness - store array of all shape IDs being dragged
     const localState = awarenessRef.current.getLocalState();
     awarenessRef.current.setLocalState({
       ...localState,
-      dragging: id,
+      dragging: shapesToDrag.length > 1 ? shapesToDrag : shapesToDrag[0],
     });
 
     if (!selectedIds.includes(id)) {
@@ -337,36 +386,58 @@ function App() {
     const initialPos = dragStartPositions.current[id];
     if (!initialPos) return;
 
-    // Calculate delta from initial position
-    const deltaX = newX - initialPos.x;
-    const deltaY = newY - initialPos.y;
+    // Get current actual position from shapes array (may have been updated by other clients)
+    const allShapesCurrent = [...shapes, ...privateShapes];
+    const currentShape = allShapesCurrent.find(s => s.id === id);
+    if (!currentShape) return;
+
+    // Calculate delta from the actual current position, not stale initial position
+    // This handles the case where another client moved the shape during our drag
+    const currentX = currentShape.x;
+    const currentY = currentShape.y;
+    const deltaX = newX - currentX;
+    const deltaY = newY - currentY;
 
     // If this shape is part of a multi-selection, move all selected shapes
     if (selectedIds.includes(id) && selectedIds.length > 1) {
       selectedIds.forEach(selectedId => {
-        const initialSelectedPos = dragStartPositions.current[selectedId];
-        if (!initialSelectedPos) return;
-
-        const updatedX = initialSelectedPos.x + deltaX;
-        const updatedY = initialSelectedPos.y + deltaY;
-
-        const selectedShape = allShapes.find(s => s.id === selectedId);
-        if (selectedShape) {
-          if (selectedShape.isPrivate) {
-            setPrivateShapes(prev =>
-              prev.map(s => (s.id === selectedId ? { ...s, x: updatedX, y: updatedY } : s))
-            );
-          } else {
-            const shapeData = shapesMapRef.current.get(selectedId);
-            if (shapeData) {
-              shapesMapRef.current.set(selectedId, { ...shapeData, x: updatedX, y: updatedY });
+        // Skip if this shape is being dragged by another client
+        const states = awarenessRef.current.getStates();
+        let isDraggedByOther = false;
+        states.forEach((state) => {
+          if (state.user && state.user.id !== userRef.current.id) {
+            const otherDraggingIds = Array.isArray(state.dragging) 
+              ? state.dragging 
+              : (state.dragging ? [state.dragging] : []);
+            if (otherDraggingIds.includes(selectedId)) {
+              isDraggedByOther = true;
             }
           }
+        });
+        
+        if (isDraggedByOther) return;
 
-          // Update the Konva node position directly for smooth dragging
-          if (shapeRefs.current[selectedId] && selectedId !== id) {
-            shapeRefs.current[selectedId].position({ x: updatedX, y: updatedY });
+        const selectedShape = allShapesCurrent.find(s => s.id === selectedId);
+        if (!selectedShape) return;
+
+        // Use current position from shapes array, not stale initial position
+        const updatedX = selectedShape.x + deltaX;
+        const updatedY = selectedShape.y + deltaY;
+
+        if (selectedShape.isPrivate) {
+          setPrivateShapes(prev =>
+            prev.map(s => (s.id === selectedId ? { ...s, x: updatedX, y: updatedY } : s))
+          );
+        } else {
+          const shapeData = shapesMapRef.current.get(selectedId);
+          if (shapeData) {
+            shapesMapRef.current.set(selectedId, { ...shapeData, x: updatedX, y: updatedY });
           }
+        }
+
+        // Update the Konva node position directly for smooth dragging
+        if (shapeRefs.current[selectedId] && selectedId !== id) {
+          shapeRefs.current[selectedId].position({ x: updatedX, y: updatedY });
         }
       });
     } else {
@@ -454,8 +525,9 @@ function App() {
     
     // Change color of all selected shapes
     if (selectedIds.length > 0) {
+      const allShapesCurrent = [...shapes, ...privateShapes];
       selectedIds.forEach(id => {
-        const shape = allShapes.find(s => s.id === id);
+        const shape = allShapesCurrent.find(s => s.id === id);
         if (shape) {
           if (shape.isPrivate) {
             setPrivateShapes(prev =>
@@ -477,8 +549,9 @@ function App() {
     const handleKeyDown = (e) => {
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.length > 0) {
         e.preventDefault();
+        const allShapesCurrent = [...shapes, ...privateShapes];
         selectedIds.forEach(id => {
-          const shape = allShapes.find(s => s.id === id);
+          const shape = allShapesCurrent.find(s => s.id === id);
           if (shape) {
             handleDelete(id, shape.isPrivate);
           }
@@ -488,7 +561,7 @@ function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedIds]);
+  }, [selectedIds, shapes, privateShapes]);
 
   const renderShape = (shape) => {
     const isSelected = selectedIds.includes(shape.id);
@@ -499,9 +572,14 @@ function App() {
     const states = awarenessRef.current?.getStates();
     if (states) {
       states.forEach((state) => {
-        if (state.user && state.user.id !== userRef.current.id && state.dragging === shape.id) {
-          isDraggingByOther = true;
-          draggingUserColor = state.user.color;
+        if (state.user && state.user.id !== userRef.current.id) {
+          const otherDraggingIds = Array.isArray(state.dragging) 
+            ? state.dragging 
+            : (state.dragging ? [state.dragging] : []);
+          if (otherDraggingIds.includes(shape.id)) {
+            isDraggingByOther = true;
+            draggingUserColor = state.user.color;
+          }
         }
       });
     }
