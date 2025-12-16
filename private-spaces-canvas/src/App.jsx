@@ -137,9 +137,14 @@ function App() {
     const ydoc = new Y.Doc();
     ydocRef.current = ydoc;
 
+    // Use public y-websocket server for production, localhost for development
+    const wsUrl = import.meta.env.DEV
+      ? `ws://${window.location.hostname}:3001`
+      : 'wss://demos.yjs.dev/ws';
+
     const provider = new WebsocketProvider(
-      `ws://${window.location.hostname}:3001`,
-      'collaborative-whiteboard',
+      wsUrl,
+      'private-spaces-whiteboard',
       ydoc
     );
     providerRef.current = provider;
