@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
-import { Stage, Layer, Rect, Circle, Star, Transformer  } from 'react-konva';
+import { Stage, Layer, Rect, Circle, Star, Line, Transformer  } from 'react-konva';
 import { v4 as uuidv4 } from 'uuid';
 
 // Icon components 
@@ -19,6 +19,15 @@ const RectIcon = () => (
 const StarIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
     <polygon points="12,2 15,9 22,9 17,14 19,21 12,17 5,21 7,14 2,9 9,9" />
+  </svg>
+);
+
+const PenIcon = () => (
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <path d="M12 19l7-7 3 3-7 7-3-3z" />
+    <path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z" />
+    <path d="M2 2l7.586 7.586" />
+    <circle cx="11" cy="11" r="2" />
   </svg>
 );
 
@@ -88,8 +97,12 @@ function App() {
   const [showPrivateConfirmation, setShowPrivateConfirmation] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [cursors, setCursors] = useState({}); // { userId: { id, nickname, color, x, y } }
-  const [selectedShapeId, setSelectedShapeId] = useState(null);
   const [onlineUsers, setOnlineUsers] = useState([]);
+  const [isDrawing, setIsDrawing] = useState(false);
+  const [currentLine, setCurrentLine] = useState(null);
+  const [selectionBox, setSelectionBox] = useState(null); // { x1, y1, x2, y2 }
+  const [isSelectingBox, setIsSelectingBox] = useState(false);
+  const [contextMenu, setContextMenu] = useState(null); // { x, y }
   const wsRef = useRef(null);
 
   const lastShapeUpdateRef = useRef(0);
@@ -111,11 +124,23 @@ const shapeRefs = useRef({});
           const nodes = selectedIds
               .map(id => shapeRefs.current[id])
               .filter(node => node); // Filter out undefined
-          
+
           transformerRef.current.nodes(nodes);
           transformerRef.current.getLayer()?.batchDraw();
       }
   }, [selectedIds]);
+
+  // Close context menu when clicking elsewhere
+  useEffect(() => {
+    const handleClickOutside = () => {
+      if (contextMenu) {
+        setContextMenu(null);
+      }
+    };
+
+    window.addEventListener('click', handleClickOutside);
+    return () => window.removeEventListener('click', handleClickOutside);
+  }, [contextMenu]);
 
   // Save private shapes to localStorage whenever they change
   useEffect(() => {
@@ -328,53 +353,41 @@ const shapeRefs = useRef({});
     prevColorRef.current = selectedColor;
   }, [selectedColor, selectedIds, shapes, privateShapes, sendMessage]);
 
-  const handleClick = (e) => {
-      if (e.target === e.target.getStage()) {
-          if (selectedIds.length > 0) {
-              setSelectedIds([]);
-              return;
-          }
-
-          const stage = e.target.getStage();
-          const pos = stage.getPointerPosition();
-
-          const newShape = {
-              id: uuidv4(),
-              x: pos.x,
-              y: pos.y,
-              type: selectedTool,
-              fill: selectedColor,
-              isPrivate: isPrivateMode,
-              isLocked: false,
-              lockedBy: null,
-          };
-
-          if (isPrivateMode) {
-              setPrivateShapes(prev => [...prev, newShape]);
-          } else {
-              setShapes(prev => [...prev, newShape]);
-              sendMessage({ type: 'ADD_SHAPE', shape: newShape });
-          }
-      }
+  const handleClick = () => {
+      // Click handling is now done in handleMouseUp for better drag detection
+      // This is kept for shape onClick events only
   };
 
-  const handleDelete = (id, isPrivate) => {
-      if (isPrivate) {
-          const idsToDelete = selectedIds.length > 0 && selectedIds.includes(id) 
-              ? selectedIds 
-              : [id];
-          setPrivateShapes(prev => prev.filter(s => !idsToDelete.includes(s.id)));
-          setSelectedIds([]);
-      } else {
-          const idsToDelete = selectedIds.length > 0 && selectedIds.includes(id) 
-              ? selectedIds 
-              : [id];
-          setShapes(prev => prev.filter(s => !idsToDelete.includes(s.id)));
-          idsToDelete.forEach(deleteId => {
-              sendMessage({ type: 'DELETE_SHAPE', id: deleteId });
-          });
-          setSelectedIds([]);
+  // Delete all selected shapes (for context menu)
+  const handleDeleteSelected = () => {
+    const allShapesLocal = [...shapes, ...privateShapes];
+
+    selectedIds.forEach(id => {
+      const shape = allShapesLocal.find(s => s.id === id);
+      if (shape) {
+        if (shape.isPrivate) {
+          setPrivateShapes(prev => prev.filter(s => s.id !== id));
+        } else {
+          setShapes(prev => prev.filter(s => s.id !== id));
+          sendMessage({ type: 'DELETE_SHAPE', id });
+        }
       }
+    });
+
+    setSelectedIds([]);
+    setContextMenu(null);
+  };
+
+  // Handle right-click context menu
+  const handleContextMenu = (e) => {
+    e.evt.preventDefault();
+
+    if (selectedIds.length > 0) {
+      setContextMenu({
+        x: e.evt.clientX,
+        y: e.evt.clientY,
+      });
+    }
   };
 
   const handleClearAll = () => {
@@ -554,6 +567,168 @@ const shapeRefs = useRef({});
     }
   };
 
+  // Helper function to get bounding box of a shape
+  const getShapeBounds = (shape) => {
+    switch (shape.type) {
+      case 'circle':
+        return {
+          x1: shape.x - 40,
+          y1: shape.y - 40,
+          x2: shape.x + 40,
+          y2: shape.y + 40,
+        };
+      case 'rect':
+        return {
+          x1: shape.x,
+          y1: shape.y,
+          x2: shape.x + 80,
+          y2: shape.y + 80,
+        };
+      case 'star':
+        return {
+          x1: shape.x - 40,
+          y1: shape.y - 40,
+          x2: shape.x + 40,
+          y2: shape.y + 40,
+        };
+      case 'pen':
+        if (!shape.points || shape.points.length < 2) return null;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (let i = 0; i < shape.points.length; i += 2) {
+          minX = Math.min(minX, shape.points[i]);
+          maxX = Math.max(maxX, shape.points[i]);
+          minY = Math.min(minY, shape.points[i + 1]);
+          maxY = Math.max(maxY, shape.points[i + 1]);
+        }
+        return { x1: minX, y1: minY, x2: maxX, y2: maxY };
+      default:
+        return null;
+    }
+  };
+
+  // Check if two rectangles intersect
+  const boxesIntersect = (box1, box2) => {
+    if (!box1 || !box2) return false;
+    return !(box1.x2 < box2.x1 || box1.x1 > box2.x2 || box1.y2 < box2.y1 || box1.y1 > box2.y2);
+  };
+
+  // Pen drawing and selection box handlers
+  const handleMouseDown = (e) => {
+    // Ignore right-click (button 2)
+    if (e.evt.button === 2) return;
+
+    // Only start selection/drawing if clicking on empty stage
+    if (e.target !== e.target.getStage()) return;
+
+    const stage = e.target.getStage();
+    const pos = stage.getPointerPosition();
+
+    if (selectedTool === 'pen') {
+      setIsDrawing(true);
+      setCurrentLine({
+        id: uuidv4(),
+        type: 'pen',
+        points: [pos.x, pos.y],
+        fill: selectedColor,
+        isPrivate: isPrivateMode,
+        isLocked: false,
+        lockedBy: null,
+      });
+    } else {
+      // Start marquee selection
+      setIsSelectingBox(true);
+      setSelectionBox({ x1: pos.x, y1: pos.y, x2: pos.x, y2: pos.y });
+    }
+  };
+
+  const handleMouseMove = (e) => {
+    const stage = e.target.getStage();
+    const pos = stage.getPointerPosition();
+
+    if (isDrawing && selectedTool === 'pen' && currentLine) {
+      setCurrentLine(prev => ({
+        ...prev,
+        points: [...prev.points, pos.x, pos.y],
+      }));
+    } else if (isSelectingBox && selectionBox) {
+      setSelectionBox(prev => ({
+        ...prev,
+        x2: pos.x,
+        y2: pos.y,
+      }));
+    }
+  };
+
+  const handleMouseUp = () => {
+    if (isDrawing && currentLine) {
+      setIsDrawing(false);
+
+      // Only save if we have more than just a starting point
+      if (currentLine.points.length > 2) {
+        if (isPrivateMode) {
+          setPrivateShapes(prev => [...prev, currentLine]);
+        } else {
+          setShapes(prev => [...prev, currentLine]);
+          sendMessage({ type: 'ADD_SHAPE', shape: currentLine });
+        }
+      }
+
+      setCurrentLine(null);
+    } else if (isSelectingBox && selectionBox) {
+      // Check if it was just a click (small movement)
+      const boxWidth = Math.abs(selectionBox.x2 - selectionBox.x1);
+      const boxHeight = Math.abs(selectionBox.y2 - selectionBox.y1);
+
+      if (boxWidth < 5 && boxHeight < 5) {
+        // It was a click, not a drag
+        if (selectedIds.length > 0) {
+          // Deselect all if something is selected
+          setSelectedIds([]);
+        } else {
+          // Create a new shape at click position
+          const newShape = {
+            id: uuidv4(),
+            x: selectionBox.x1,
+            y: selectionBox.y1,
+            type: selectedTool,
+            fill: selectedColor,
+            isPrivate: isPrivateMode,
+            isLocked: false,
+            lockedBy: null,
+          };
+
+          if (isPrivateMode) {
+            setPrivateShapes(prev => [...prev, newShape]);
+          } else {
+            setShapes(prev => [...prev, newShape]);
+            sendMessage({ type: 'ADD_SHAPE', shape: newShape });
+          }
+        }
+      } else {
+        // It was a drag - select shapes inside the box
+        const correctedBox = {
+          x1: Math.min(selectionBox.x1, selectionBox.x2),
+          y1: Math.min(selectionBox.y1, selectionBox.y2),
+          x2: Math.max(selectionBox.x1, selectionBox.x2),
+          y2: Math.max(selectionBox.y1, selectionBox.y2),
+        };
+
+        const allShapesLocal = [...shapes, ...privateShapes];
+        const selectedShapeIds = allShapesLocal
+          .filter(shape => {
+            const shapeBounds = getShapeBounds(shape);
+            return boxesIntersect(shapeBounds, correctedBox);
+          })
+          .map(shape => shape.id);
+
+        setSelectedIds(selectedShapeIds);
+      }
+
+      setIsSelectingBox(false);
+      setSelectionBox(null);
+    }
+  };
+
   const renderShape = (shape) => {
     const isLockedByOther = shape.isLocked && shape.lockedBy !== userRef.current.id;
     const isSelected = selectedIds.includes(shape.id); 
@@ -569,19 +744,18 @@ const shapeRefs = useRef({});
       fill: shape.fill,
       draggable: !isLockedByOther,
       onDragStart: (e) => handleDragStart(e, shape),
-      //remember to delete later
       opacity: isLockedByOther ? 0.6 : 1,
       onDragMove: (e) => handleDragMove(e, shape),
       onDragEnd: (e) => handleDragEnd(e, shape),
-      // onClick: () => setSelectedShapeId(shape.id),
-      onDblClick: () => setSelectedShapeId(shape.id),
       onClick: (e) => {
             e.cancelBubble = true;
+            // Ignore right-click
+            if (e.evt.button === 2) return;
             if (isLockedByOther) return;
 
             if (e.evt.shiftKey) {
                 // Shift+Click: Add/remove from selection
-                setSelectedIds(prev => 
+                setSelectedIds(prev =>
                     prev.includes(shape.id)
                         ? prev.filter(id => id !== shape.id)
                         : [...prev, shape.id]
@@ -590,6 +764,23 @@ const shapeRefs = useRef({});
                 // regular click
                 setSelectedIds([shape.id]);
             }
+        },
+      onContextMenu: (e) => {
+            e.evt.preventDefault();
+            e.cancelBubble = true;
+            if (isLockedByOther) return;
+
+            // If shape is already selected, keep current selection
+            // If not, select just this shape
+            if (!selectedIds.includes(shape.id)) {
+                setSelectedIds([shape.id]);
+            }
+
+            // Show context menu
+            setContextMenu({
+                x: e.evt.clientX,
+                y: e.evt.clientY,
+            });
         },
 
       // Add dashed stroke for private shapes to visually distinguish them
@@ -605,6 +796,19 @@ const shapeRefs = useRef({});
         return <Rect {...props} width={80} height={80} />;
       case 'star':
         return <Star {...props} numPoints={5} innerRadius={20} outerRadius={40} />;
+      case 'pen':
+        return (
+          <Line
+            {...props}
+            points={shape.points}
+            stroke={shape.fill}
+            strokeWidth={3}
+            tension={0.5}
+            lineCap="round"
+            lineJoin="round"
+            globalCompositeOperation="source-over"
+          />
+        );
       default:
         return null;
     }
@@ -614,6 +818,7 @@ const shapeRefs = useRef({});
   const allShapes = [...shapes, ...privateShapes];
 
   const tools = [
+    { id: 'pen', icon: <PenIcon />, label: 'Pen' },
     { id: 'circle', icon: <CircleIcon />, label: 'Circle' },
     { id: 'rect', icon: <RectIcon />, label: 'Rectangle' },
     { id: 'star', icon: <StarIcon />, label: 'Star' },
@@ -728,7 +933,7 @@ const shapeRefs = useRef({});
 
       {/* Help Tooltip */}
       <div className="help-tooltip">
-        <span>Click to add • Drag to move • Click shape to select • Delete when selected</span>
+        <span>Click to add • Drag to select • Shift+Click multi-select • Right-click to delete</span>
       </div>
 
       {/* Private Mode Confirmation Modal */}
@@ -765,10 +970,41 @@ const shapeRefs = useRef({});
         width={window.innerWidth}
         height={window.innerHeight}
         onClick={handleClick}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        onContextMenu={handleContextMenu}
         className="canvas"
+        style={{ cursor: selectedTool === 'pen' ? 'crosshair' : 'default' }}
       >
         <Layer>
           {allShapes.map(renderShape)}
+          {/* Render current line being drawn */}
+          {currentLine && (
+            <Line
+              points={currentLine.points}
+              stroke={currentLine.fill}
+              strokeWidth={3}
+              tension={0.5}
+              lineCap="round"
+              lineJoin="round"
+              globalCompositeOperation="source-over"
+            />
+          )}
+          {/* Render selection box while dragging */}
+          {selectionBox && isSelectingBox && (
+            <Rect
+              x={Math.min(selectionBox.x1, selectionBox.x2)}
+              y={Math.min(selectionBox.y1, selectionBox.y2)}
+              width={Math.abs(selectionBox.x2 - selectionBox.x1)}
+              height={Math.abs(selectionBox.y2 - selectionBox.y1)}
+              fill="rgba(0, 150, 255, 0.1)"
+              stroke="#0096FF"
+              strokeWidth={1}
+              dash={[4, 4]}
+            />
+          )}
           {/* Transformer for selection handle (visuals) */}
           <Transformer
               ref={transformerRef}
@@ -783,6 +1019,26 @@ const shapeRefs = useRef({});
           />
         </Layer>
       </Stage>
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          className="context-menu"
+          style={{
+            left: contextMenu.x,
+            top: contextMenu.y,
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            className="context-menu-item delete"
+            onClick={handleDeleteSelected}
+          >
+            <TrashIcon />
+            <span>Delete {selectedIds.length > 1 ? `(${selectedIds.length})` : ''}</span>
+          </button>
+        </div>
+      )}
 
       {/* Other users' cursors */}
       {Object.values(cursors).map(cursor => {
@@ -811,31 +1067,6 @@ const shapeRefs = useRef({});
           </div>
         );
       })}
-
-      {/* Delete button for selected shape */}
-      {selectedShapeId && (() => {
-        const selectedShape = allShapes.find(s => s.id === selectedShapeId);
-        if (selectedShape) {
-          const deleteButtonX = selectedShape.x + 50;
-          const deleteButtonY = selectedShape.y - 40;
-          return (
-            <button
-              className="shape-delete-button"
-              style={{
-                left: `${deleteButtonX}px`,
-                top: `${deleteButtonY}px`,
-              }}
-              onClick={() => {
-                handleDelete(selectedShapeId, selectedShape.isPrivate);
-                setSelectedShapeId(null);
-              }}
-              title="Delete shape"
-            >
-              ×
-            </button>
-          );
-        }
-      })()}
 
       {/* User Presence Panel */}
       <div className="user-presence-panel">
