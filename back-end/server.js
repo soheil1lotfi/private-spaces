@@ -204,6 +204,69 @@ wss.on("connection", (ws) => {
           });
         }
         break;
+
+        case "LOCK_GROUP_REQUEST":
+          const groupUser = clients.get(ws);
+          const deniedShapes = [];
+          const grantedShapes = [];
+
+          data.shapeIds.forEach(shapeId => {
+            const shape = shapes.find(s => s.id === shapeId);
+            if (!shape) return;
+            
+            if (shape.isLocked && shape.lockedBy !== groupUser.id) {
+              deniedShapes.push(shapeId);
+            } else {
+              shape.isLocked = true;
+              shape.lockedBy = groupUser.id;
+              grantedShapes.push(shape);
+            }
+          });
+
+          // If any shape in the group is locked by another user, deny the whole group
+          if (deniedShapes.length > 0) {
+            // Rollback any locks we just acquired
+            grantedShapes.forEach(shape => {
+              shape.isLocked = false;
+              shape.lockedBy = null;
+            });
+            
+            ws.send(JSON.stringify({
+              type: "LOCK_GROUP_DENIED",
+              shapeIds: deniedShapes,
+            }));
+          } else {
+            ws.send(JSON.stringify({
+              type: "LOCK_GROUP_GRANTED",
+              shapeIds: data.shapeIds,
+            }));
+
+            // Broadcast updated shapes to other clients
+            grantedShapes.forEach(shape => {
+              broadcastExcept(ws, {
+                type: "SHAPE_UPDATED",
+                shape: shape,
+              });
+            });
+          }
+          break;
+
+        case "UNLOCK_GROUP_REQUEST":
+          const unlockUser = clients.get(ws);
+          
+          data.shapeIds.forEach(shapeId => {
+            const shape = shapes.find(s => s.id === shapeId);
+            if (shape && shape.lockedBy === unlockUser.id) {
+              shape.isLocked = false;
+              shape.lockedBy = null;
+              
+              broadcast({
+                type: "SHAPE_UPDATED",
+                shape: shape,
+              });
+            }
+          });
+          break;
     }
   });
 
