@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
 import { Stage, Layer, Rect, Circle, Star, Transformer  } from 'react-konva';
 import { v4 as uuidv4 } from 'uuid';
@@ -74,6 +74,35 @@ const generateUserColor = () => {
 // localStorage key for private shapes
 const PRIVATE_SHAPES_KEY = 'private-spaces-private-shapes';
 
+// Helper to create a nested Y.Map for a shape (CRDT-friendly)
+const createYMapShape = (shapeData) => {
+  const yShape = new Y.Map();
+  yShape.set('x', shapeData.x);
+  yShape.set('y', shapeData.y);
+  yShape.set('type', shapeData.type);
+  yShape.set('fill', shapeData.fill);
+  yShape.set('isPrivate', shapeData.isPrivate);
+  yShape.set('isLocked', shapeData.isLocked);
+  return yShape;
+};
+
+// Helper to convert Y.Map shape to plain object
+const yMapToShape = (yShape, id) => {
+  if (yShape instanceof Y.Map) {
+    return {
+      id,
+      x: yShape.get('x'),
+      y: yShape.get('y'),
+      type: yShape.get('type'),
+      fill: yShape.get('fill'),
+      isPrivate: yShape.get('isPrivate'),
+      isLocked: yShape.get('isLocked'),
+    };
+  }
+  // Fallback for plain objects (backwards compatibility)
+  return { ...yShape, id };
+};
+
 function App() {
   const [shapes, setShapes] = useState([]);
   const [privateShapes, setPrivateShapes] = useState(() => {
@@ -89,6 +118,12 @@ function App() {
   const [cursors, setCursors] = useState({});
   const [selectedShapeId, setSelectedShapeId] = useState(null);
   const [onlineUsers, setOnlineUsers] = useState([]);
+  
+  // Window dimensions for responsive canvas
+  const [windowSize, setWindowSize] = useState({
+    width: window.innerWidth,
+    height: window.innerHeight,
+  });
 
   const [selectedIds, setSelectedIds] = useState([]);
   const transformerRef = useRef(null);
@@ -96,15 +131,19 @@ function App() {
 
   // Y.js-First: Store initial positions for delta calculation
   const dragInitialPositions = useRef({});
-  const lastUpdateTime = useRef(0);
   const THROTTLE_MS = 16; 
 
-  // User identity
-  const userRef = useRef({
+  // Refs for keyboard handler (avoid recreating on every state change)
+  const selectedIdsRef = useRef(selectedIds);
+  const shapesRef = useRef(shapes);
+  const privateShapesRef = useRef(privateShapes);
+
+  // User identity - use useState with lazy init to ensure stable identity
+  const [currentUser] = useState(() => ({
     id: uuidv4(),
     nickname: generateNickname(),
     color: generateUserColor(),
-  });
+  }));
 
   // Y.js refs
   const ydocRef = useRef(null);
@@ -112,6 +151,32 @@ function App() {
   const shapesMapRef = useRef(null);
   const awarenessRef = useRef(null);
   const shapesObserverRef = useRef(null);
+
+  // Keep refs in sync with state
+  useEffect(() => {
+    selectedIdsRef.current = selectedIds;
+  }, [selectedIds]);
+
+  useEffect(() => {
+    shapesRef.current = shapes;
+  }, [shapes]);
+
+  useEffect(() => {
+    privateShapesRef.current = privateShapes;
+  }, [privateShapes]);
+
+  // Window resize handler
+  useEffect(() => {
+    const handleResize = () => {
+      setWindowSize({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
 
   // Update transformer when selection changes
   useEffect(() => {
@@ -132,7 +197,7 @@ function App() {
 
   // Y.js initialization
   useEffect(() => {
-    setOnlineUsers([userRef.current]);
+    // Don't set initial users - let awareness populate it
     
     const ydoc = new Y.Doc();
     ydocRef.current = ydoc;
@@ -150,8 +215,11 @@ function App() {
     const awareness = provider.awareness;
     awarenessRef.current = awareness;
 
+    // Store current user in a local variable for cleanup
+    const user = currentUser;
+    
     awareness.setLocalState({
-      user: userRef.current,
+      user,
       cursor: { x: 0, y: 0 },
       isPrivateMode: false,
     });
@@ -167,10 +235,9 @@ function App() {
     const updateShapes = () => {
       const shapesArray = [];
       shapesMap.forEach((shape, id) => {
-        // Y.js Standard: Ensure shape is a plain object
-        const shapeObj = shape instanceof Y.Map ? shape.toJSON() : shape;
+        const shapeObj = yMapToShape(shape, id);
         if (!shapeObj.isPrivate) {
-          shapesArray.push({ ...shapeObj, id });
+          shapesArray.push(shapeObj);
         }
       });
       setShapes(shapesArray);
@@ -178,7 +245,7 @@ function App() {
 
     // Store observer reference for cleanup
     shapesObserverRef.current = updateShapes;
-    shapesMap.observe(updateShapes);
+    shapesMap.observeDeep(updateShapes);
     updateShapes(); // Initial load
 
     // Awareness changes
@@ -190,7 +257,7 @@ function App() {
       states.forEach((state) => {
         if (!state.user) return;
 
-        if (state.user.id !== userRef.current.id && !state.isPrivateMode) {
+        if (state.user.id !== user.id && !state.isPrivateMode) {
           newCursors[state.user.id] = {
             ...state.user,
             x: state.cursor?.x || 0,
@@ -227,14 +294,47 @@ function App() {
       window.removeEventListener('mousemove', handleMouseMove);
       // Y.js Standard: Use stored observer reference for cleanup
       if (shapesObserverRef.current) {
-        shapesMap.unobserve(shapesObserverRef.current);
+        shapesMap.unobserveDeep(shapesObserverRef.current);
         shapesObserverRef.current = null;
       }
       awareness.off('change', updateAwareness);
       provider.destroy();
       ydoc.destroy();
     };
+  }, [currentUser]);
+
+  // Delete handler as callback for keyboard handler
+  const handleDelete = useCallback((id, isPrivate) => {
+    if (isPrivate) {
+      setPrivateShapes(prev => prev.filter(s => s.id !== id));
+    } else {
+      // Y.js Standard: Use transaction
+      ydocRef.current.transact(() => {
+        shapesMapRef.current.delete(id);
+      });
+    }
+    setSelectedIds(prev => prev.filter(i => i !== id));
+    setSelectedShapeId(null);
   }, []);
+
+  // Keyboard shortcuts - using refs to avoid recreation
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIdsRef.current.length > 0) {
+        e.preventDefault();
+        const allShapesCurrent = [...shapesRef.current, ...privateShapesRef.current];
+        selectedIdsRef.current.forEach(id => {
+          const shape = allShapesCurrent.find(s => s.id === id);
+          if (shape) {
+            handleDelete(id, shape.isPrivate);
+          }
+        });
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [handleDelete]); // Only depends on handleDelete which is memoized
 
   const handleClick = (e) => {
     if (e.target === e.target.getStage()) {
@@ -245,7 +345,7 @@ function App() {
       const stage = e.target.getStage();
       const pointerPosition = stage.getPointerPosition();
 
-      const newShape = {
+      const newShapeData = {
         id: uuidv4(),
         x: pointerPosition.x,
         y: pointerPosition.y,
@@ -256,11 +356,12 @@ function App() {
       };
 
       if (isPrivateMode) {
-        setPrivateShapes(prev => [...prev, newShape]);
+        setPrivateShapes(prev => [...prev, newShapeData]);
       } else {
-        // Y.js Standard: Use Y.transact for atomic updates
+        // Y.js Standard: Use nested Y.Map for CRDT-friendly updates
         ydocRef.current.transact(() => {
-          shapesMapRef.current.set(newShape.id, newShape);
+          const yShape = createYMapShape(newShapeData);
+          shapesMapRef.current.set(newShapeData.id, yShape);
         });
       }
       
@@ -310,16 +411,20 @@ function App() {
     }
   };
 
+  // Throttle helper using requestAnimationFrame timing
+  const throttledUpdate = useRef(null);
+  
   // Y.js-First: Only update Y.js, let observer handle React/Konva updates
   const handleDragMove = (e, shape) => {
-    // Throttle updates
-    // Note: Date.now() is safe here - handleDragMove is an event handler, not called during render
-    // The linter incorrectly flags this, but it's a false positive
-    const now = Date.now();
-    if (now - lastUpdateTime.current < THROTTLE_MS) {
+    // Skip if we're waiting for next frame
+    if (throttledUpdate.current) {
       return;
     }
-    lastUpdateTime.current = now;
+    
+    // Set up throttle for next THROTTLE_MS
+    throttledUpdate.current = setTimeout(() => {
+      throttledUpdate.current = null;
+    }, THROTTLE_MS);
 
     const id = shape.id;
     const node = e.target;
@@ -334,33 +439,51 @@ function App() {
     const deltaX = newX - initialPos.x;
     const deltaY = newY - initialPos.y;
 
-    // Multi-select: update all selected shapes in Y.js
-    if (selectedIds.includes(id) && selectedIds.length > 1) {
-      // Y.js Standard: Batch updates in single transaction
+    // Use refs for current state to avoid stale closures
+    const currentSelectedIds = selectedIdsRef.current;
+
+    // Multi-select: update all selected shapes
+    if (currentSelectedIds.includes(id) && currentSelectedIds.length > 1) {
+      // Update Y.js shapes with nested Y.Map (CRDT-friendly per-property updates)
       ydocRef.current.transact(() => {
-        selectedIds.forEach(selectedId => {
+        currentSelectedIds.forEach(selectedId => {
           const initialSelectedPos = dragInitialPositions.current[selectedId];
           if (!initialSelectedPos) return;
 
           const updatedX = initialSelectedPos.x + deltaX;
           const updatedY = initialSelectedPos.y + deltaY;
 
-          // Read directly from Y.js Map (not React state) to get latest data
-          const shapeData = shapesMapRef.current.get(selectedId);
-          if (!shapeData || shapeData.isPrivate) return;
+          const yShape = shapesMapRef.current.get(selectedId);
+          if (!yShape) return;
+          
+          // Check if it's a Y.Map (nested) or plain object
+          if (yShape instanceof Y.Map) {
+            if (yShape.get('isPrivate')) return;
+            // CRDT-friendly: update individual properties
+            yShape.set('x', updatedX);
+            yShape.set('y', updatedY);
+          } else {
+            // Fallback for plain objects
+            if (yShape.isPrivate) return;
+            shapesMapRef.current.set(selectedId, { 
+              ...yShape, 
+              x: updatedX, 
+              y: updatedY 
+            });
+          }
 
-          // Merge with existing data to preserve all properties (like fill/color)
-          shapesMapRef.current.set(selectedId, { 
-            ...shapeData, 
-            x: updatedX, 
-            y: updatedY 
-          });
+          // Update Konva node directly for smooth multi-select drag
+          const konvaNode = shapeRefs.current[selectedId];
+          if (konvaNode && selectedId !== id) {
+            konvaNode.x(updatedX);
+            konvaNode.y(updatedY);
+          }
         });
       });
       
       // Handle private shapes separately (outside Y.js)
-      const privateIds = selectedIds.filter(selectedId => {
-        const allShapesCurrent = [...shapes, ...privateShapes];
+      const allShapesCurrent = [...shapesRef.current, ...privateShapesRef.current];
+      const privateIds = currentSelectedIds.filter(selectedId => {
         const selectedShape = allShapesCurrent.find(s => s.id === selectedId);
         return selectedShape && selectedShape.isPrivate;
       });
@@ -369,9 +492,16 @@ function App() {
         setPrivateShapes(prev =>
           prev.map(s => {
             if (privateIds.includes(s.id)) {
-              const initialPos = dragInitialPositions.current[s.id];
-              if (initialPos) {
-                return { ...s, x: initialPos.x + deltaX, y: initialPos.y + deltaY };
+              const initPos = dragInitialPositions.current[s.id];
+              if (initPos) {
+                const newPos = { ...s, x: initPos.x + deltaX, y: initPos.y + deltaY };
+                // Update Konva node directly for smooth drag
+                const konvaNode = shapeRefs.current[s.id];
+                if (konvaNode && s.id !== id) {
+                  konvaNode.x(newPos.x);
+                  konvaNode.y(newPos.y);
+                }
+                return newPos;
               }
             }
             return s;
@@ -385,14 +515,17 @@ function App() {
           prev.map(s => (s.id === id ? { ...s, x: newX, y: newY } : s))
         );
       } else {
-        // Y.js Standard: Use transaction
-        // Read fresh data from Y.js Map to preserve concurrent updates (like color changes)
+        // Y.js Standard: Use nested Y.Map for per-property CRDT updates
         ydocRef.current.transact(() => {
-          const shapeData = shapesMapRef.current.get(id);
-          if (shapeData) {
-            // Merge with existing data to preserve all properties (like fill/color)
+          const yShape = shapesMapRef.current.get(id);
+          if (yShape instanceof Y.Map) {
+            // CRDT-friendly: update individual properties (won't overwrite color changes)
+            yShape.set('x', newX);
+            yShape.set('y', newY);
+          } else if (yShape) {
+            // Fallback for plain objects
             shapesMapRef.current.set(id, { 
-              ...shapeData, 
+              ...yShape, 
               x: newX, 
               y: newY 
             });
@@ -402,22 +535,56 @@ function App() {
     }
   };
 
-  const handleDragEnd = () => {
+  // Sync final position on drag end (fixes throttling data loss)
+  const handleDragEnd = (e, shape) => {
+    const id = shape.id;
+    const node = e.target;
+    const finalX = node.x();
+    const finalY = node.y();
+
+    // Sync final position to Y.js
+    if (!shape.isPrivate) {
+      ydocRef.current.transact(() => {
+        const yShape = shapesMapRef.current.get(id);
+        if (yShape instanceof Y.Map) {
+          yShape.set('x', finalX);
+          yShape.set('y', finalY);
+        } else if (yShape) {
+          shapesMapRef.current.set(id, { ...yShape, x: finalX, y: finalY });
+        }
+      });
+
+      // For multi-select, sync all other selected shapes too
+      if (selectedIds.includes(id) && selectedIds.length > 1) {
+        const initialPos = dragInitialPositions.current[id];
+        if (initialPos) {
+          const deltaX = finalX - initialPos.x;
+          const deltaY = finalY - initialPos.y;
+
+          ydocRef.current.transact(() => {
+            selectedIds.forEach(selectedId => {
+              if (selectedId === id) return; // Already synced above
+              const initPos = dragInitialPositions.current[selectedId];
+              if (!initPos) return;
+
+              const yShape = shapesMapRef.current.get(selectedId);
+              if (yShape instanceof Y.Map && !yShape.get('isPrivate')) {
+                yShape.set('x', initPos.x + deltaX);
+                yShape.set('y', initPos.y + deltaY);
+              }
+            });
+          });
+        }
+      }
+    } else {
+      // Sync final position for private shape
+      setPrivateShapes(prev =>
+        prev.map(s => (s.id === id ? { ...s, x: finalX, y: finalY } : s))
+      );
+    }
+
     // Clear stored positions
     dragInitialPositions.current = {};
-  };
-
-  const handleDelete = (id, isPrivate) => {
-    if (isPrivate) {
-      setPrivateShapes(prev => prev.filter(s => s.id !== id));
-    } else {
-      // Y.js Standard: Use transaction
-      ydocRef.current.transact(() => {
-        shapesMapRef.current.delete(id);
-      });
-    }
-    setSelectedIds(prev => prev.filter(i => i !== id));
-    setSelectedShapeId(null);
   };
 
   const handleClearAll = () => {
@@ -439,11 +606,12 @@ function App() {
     } else {
       // Exiting private mode - share private shapes
       if (privateShapes.length > 0) {
-        // Y.js Standard: Batch updates in transaction
+        // Y.js Standard: Batch updates in transaction with nested Y.Maps
         ydocRef.current.transact(() => {
           privateShapes.forEach(shape => {
-            const sharedShape = { ...shape, isPrivate: false };
-            shapesMapRef.current.set(shape.id, sharedShape);
+            const sharedShapeData = { ...shape, isPrivate: false };
+            const yShape = createYMapShape(sharedShapeData);
+            shapesMapRef.current.set(shape.id, yShape);
           });
         });
         setPrivateShapes([]);
@@ -474,15 +642,16 @@ function App() {
     
     // Change color of all selected shapes
     if (selectedIds.length > 0) {
-      // Y.js Standard: Batch color updates in transaction
-      // Read directly from Y.js Map (not React state) to get latest data
-      // This ensures we have the most recent position updates from other clients
+      // Y.js Standard: CRDT-friendly per-property updates
       ydocRef.current.transact(() => {
         selectedIds.forEach(id => {
-          const shapeData = shapesMapRef.current.get(id);
-          if (shapeData && !shapeData.isPrivate) {
-            // Merge with existing data to preserve all properties (like x, y position)
-            shapesMapRef.current.set(id, { ...shapeData, fill: newColor });
+          const yShape = shapesMapRef.current.get(id);
+          if (yShape instanceof Y.Map && !yShape.get('isPrivate')) {
+            // CRDT-friendly: only update fill, preserves x/y from other clients
+            yShape.set('fill', newColor);
+          } else if (yShape && !yShape.isPrivate) {
+            // Fallback for plain objects
+            shapesMapRef.current.set(id, { ...yShape, fill: newColor });
           }
         });
       });
@@ -502,25 +671,6 @@ function App() {
     }
   };
 
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIds.length > 0) {
-        e.preventDefault();
-        const allShapesCurrent = [...shapes, ...privateShapes];
-        selectedIds.forEach(id => {
-          const shape = allShapesCurrent.find(s => s.id === id);
-          if (shape) {
-            handleDelete(id, shape.isPrivate);
-          }
-        });
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedIds, shapes, privateShapes]);
-
   const renderShape = (shape) => {
     const isSelected = selectedIds.includes(shape.id);
 
@@ -538,7 +688,7 @@ function App() {
       onTap: (e) => handleShapeClick(e, shape),
       onDragStart: (e) => handleDragStart(e, shape),
       onDragMove: (e) => handleDragMove(e, shape),
-      onDragEnd: handleDragEnd,
+      onDragEnd: (e) => handleDragEnd(e, shape),
       ref: (node) => {
         if (node) {
           shapeRefs.current[shape.id] = node;
@@ -575,7 +725,7 @@ function App() {
       {/* Toolbar */}
       <div className="toolbar">
         <div className="toolbar-section">
-          <span className="section-label">Welcome, {userRef.current.nickname}!</span>
+          <span className="section-label">Welcome, {currentUser.nickname}!</span>
         </div>
 
         <div className="toolbar-divider"></div>
@@ -704,10 +854,10 @@ function App() {
         </div>
       )}
 
-      {/* Canvas */}
+      {/* Canvas - now responsive */}
       <Stage
-        width={window.innerWidth}
-        height={window.innerHeight}
+        width={windowSize.width}
+        height={windowSize.height}
         onClick={handleClick}
         className="canvas"
       >
@@ -729,7 +879,7 @@ function App() {
 
       {/* Other users' cursors */}
       {Object.values(cursors).map(cursor => {
-        if (cursor.id === userRef.current.id) return null;
+        if (cursor.id === currentUser.id) return null;
         
         return (
           <div
@@ -795,7 +945,7 @@ function App() {
                 {user.isPrivateMode ? '🔒' : user.nickname.charAt(0).toUpperCase()}
               </div>
               <span className="user-nickname">{user.nickname}</span>
-              {user.id === userRef.current.id && <span className="user-label">(You)</span>}
+              {user.id === currentUser.id && <span className="user-label">(You)</span>}
               {user.isPrivateMode && <span className="user-label private">Private</span>}
             </div>
           ))}
