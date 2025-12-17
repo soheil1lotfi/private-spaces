@@ -152,7 +152,6 @@ function App() {
   const [showPrivateConfirmation, setShowPrivateConfirmation] = useState(false);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [cursors, setCursors] = useState({});
-  const [selectedShapeId, setSelectedShapeId] = useState(null);
   const [onlineUsers, setOnlineUsers] = useState([]);
   
   // Window dimensions for responsive canvas
@@ -170,6 +169,15 @@ function App() {
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [isPanModeActive, setIsPanModeActive] = useState(false); // Toggle pan mode from UI
   const stageRef = useRef(null);
+
+  // Marquee selection state
+  const [isSelecting, setIsSelecting] = useState(false);
+  const [selectionRect, setSelectionRect] = useState(null);
+  const selectionStartRef = useRef(null);
+
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState(null);
+  const contextMenuJustOpenedRef = useRef(false);
 
   const transformerRef = useRef(null);
   const shapeRefs = useRef({});
@@ -221,6 +229,28 @@ function App() {
   useEffect(() => {
     stageScaleRef.current = stageScale;
   }, [stageScale]);
+
+  // Close context menu when clicking outside
+  useEffect(() => {
+    const handleGlobalMouseDown = (e) => {
+      // Don't close if clicking inside the context menu
+      if (e.target.closest('.context-menu')) {
+        return;
+      }
+      setContextMenu(null);
+    };
+
+    if (contextMenu) {
+      // Delay adding listener to avoid immediate close from the same right-click
+      const timer = setTimeout(() => {
+        window.addEventListener('mousedown', handleGlobalMouseDown);
+      }, 100);
+      return () => {
+        clearTimeout(timer);
+        window.removeEventListener('mousedown', handleGlobalMouseDown);
+      };
+    }
+  }, [contextMenu]);
 
   // Window resize handler
   useEffect(() => {
@@ -379,7 +409,6 @@ function App() {
       });
     }
     setSelectedIds(prev => prev.filter(i => i !== id));
-    setSelectedShapeId(null);
   }, []);
 
   // Get canvas coordinates from screen coordinates (accounting for pan/zoom)
@@ -523,14 +552,41 @@ function App() {
 
   // Pan start handler
   const handleMouseDown = (e) => {
+    // Ignore right-click (button 2) - let context menu handler deal with it
+    if (e.evt.button === 2) {
+      return;
+    }
+
+    // Close context menu on left/middle click
+    setContextMenu(null);
+
     // Middle mouse button, space+left click, or pan mode active + left click
     if (e.evt.button === 1 || ((isSpacePressed || isPanModeActive) && e.evt.button === 0)) {
       e.evt.preventDefault();
       setIsPanning(true);
+      return;
+    }
+
+    // Left click on empty canvas - start marquee selection
+    if (e.evt.button === 0 && e.target === e.target.getStage()) {
+      const stage = stageRef.current;
+      if (!stage) return;
+
+      const pointer = stage.getPointerPosition();
+      const canvasPoint = getCanvasPoint(pointer.x, pointer.y);
+
+      selectionStartRef.current = canvasPoint;
+      setIsSelecting(true);
+      setSelectionRect({
+        x: canvasPoint.x,
+        y: canvasPoint.y,
+        width: 0,
+        height: 0,
+      });
     }
   };
 
-  // Pan move handler
+  // Pan/Selection move handler
   const handleMouseMove = (e) => {
     if (isPanning) {
       const stage = stageRef.current;
@@ -540,25 +596,170 @@ function App() {
         x: stagePos.x + e.evt.movementX,
         y: stagePos.y + e.evt.movementY,
       });
+      return;
+    }
+
+    // Marquee selection drag
+    if (isSelecting && selectionStartRef.current) {
+      const stage = stageRef.current;
+      if (!stage) return;
+
+      const pointer = stage.getPointerPosition();
+      const canvasPoint = getCanvasPoint(pointer.x, pointer.y);
+      const start = selectionStartRef.current;
+
+      // Calculate rectangle (handle negative width/height)
+      const x = Math.min(start.x, canvasPoint.x);
+      const y = Math.min(start.y, canvasPoint.y);
+      const width = Math.abs(canvasPoint.x - start.x);
+      const height = Math.abs(canvasPoint.y - start.y);
+
+      setSelectionRect({ x, y, width, height });
     }
   };
 
-  // Pan end handler
+  // Pan/Selection end handler
   const handleMouseUp = () => {
     if (isPanning) {
       setIsPanning(false);
+      return;
+    }
+
+    // End marquee selection
+    if (isSelecting && selectionRect) {
+      // Find shapes that intersect with selection rectangle
+      const allShapesCurrent = [...shapes, ...privateShapes];
+      const selectedShapeIds = allShapesCurrent.filter(shape => {
+        // Get shape bounds (approximate based on type)
+        let shapeWidth = 100;
+        let shapeHeight = 100;
+        if (shape.type === 'circle') {
+          shapeWidth = 100; // radius * 2
+          shapeHeight = 100;
+        } else if (shape.type === 'star') {
+          shapeWidth = 80;
+          shapeHeight = 80;
+        }
+
+        const shapeLeft = shape.x - shapeWidth / 2;
+        const shapeRight = shape.x + shapeWidth / 2;
+        const shapeTop = shape.y - shapeHeight / 2;
+        const shapeBottom = shape.y + shapeHeight / 2;
+
+        const rectLeft = selectionRect.x;
+        const rectRight = selectionRect.x + selectionRect.width;
+        const rectTop = selectionRect.y;
+        const rectBottom = selectionRect.y + selectionRect.height;
+
+        // Check intersection
+        return !(shapeRight < rectLeft || shapeLeft > rectRight ||
+                 shapeBottom < rectTop || shapeTop > rectBottom);
+      }).map(shape => shape.id);
+
+      if (selectedShapeIds.length > 0) {
+        setSelectedIds(selectedShapeIds);
+      }
+
+      setIsSelecting(false);
+      setSelectionRect(null);
+      selectionStartRef.current = null;
     }
   };
 
+  // Right-click context menu handler
+  const handleContextMenu = (e) => {
+    e.evt.preventDefault();
+
+    // Mark that context menu is being opened to prevent handleClick from closing it
+    contextMenuJustOpenedRef.current = true;
+    setTimeout(() => {
+      contextMenuJustOpenedRef.current = false;
+    }, 0);
+
+    // Check if we right-clicked on a shape
+    const clickedOnShape = e.target !== e.target.getStage();
+
+    if (clickedOnShape) {
+      // Get the shape id from the clicked target
+      const shapeId = e.target.id();
+
+      // Use ref for latest selectedIds value to avoid stale closures
+      // Only change selection if clicked shape is NOT part of current selection
+      if (!selectedIdsRef.current.includes(shapeId)) {
+        setSelectedIds([shapeId]);
+      }
+
+      // Show context menu
+      setContextMenu({
+        x: e.evt.clientX,
+        y: e.evt.clientY,
+      });
+    } else if (selectedIdsRef.current.length > 0) {
+      // Right-clicked on empty canvas but have shapes selected
+      setContextMenu({
+        x: e.evt.clientX,
+        y: e.evt.clientY,
+      });
+    }
+  };
+
+  // Delete all selected shapes
+  const handleDeleteSelected = useCallback(() => {
+    const allShapesCurrent = [...shapesRef.current, ...privateShapesRef.current];
+
+    // Use ref for latest selectedIds to ensure we delete all currently selected shapes
+    const idsToDelete = selectedIdsRef.current;
+
+    idsToDelete.forEach(id => {
+      const shape = allShapesCurrent.find(s => s.id === id);
+      if (shape) {
+        handleDelete(id, shape.isPrivate);
+      }
+    });
+
+    setSelectedIds([]);
+    setContextMenu(null);
+  }, [handleDelete]);
+
   const handleClick = (e) => {
+    // Only process left-clicks (button 0) - right-click is for context menu only
+    if (e.evt && e.evt.button !== 0) {
+      return;
+    }
+
     // Don't create shapes while panning or in pan mode
     if (isPanning || isSpacePressed || isPanModeActive) return;
 
+    // Skip if context menu was just opened (prevents closing it immediately)
+    if (contextMenuJustOpenedRef.current) {
+      return;
+    }
+
+    // If context menu is open, close it and don't do anything else
+    if (contextMenu) {
+      setContextMenu(null);
+      return;
+    }
+
     if (e.target === e.target.getStage()) {
+      // If we were doing a real marquee selection (dragged more than 5px), don't create a shape
+      // Small or zero-size selection means it was just a click, so allow shape creation
+      const wasRealSelection = selectionRect &&
+        (Math.abs(selectionRect.width) > 5 || Math.abs(selectionRect.height) > 5);
+
+      if (isSelecting || wasRealSelection) {
+        setIsSelecting(false);
+        setSelectionRect(null);
+        if (wasRealSelection) {
+          return; // Don't create shape after marquee selection
+        }
+      }
+
       if (selectedIds.length > 0) {
         setSelectedIds([]);
         return;
       }
+
       const stage = e.target.getStage();
       const pointerPosition = stage.getPointerPosition();
 
@@ -586,14 +787,18 @@ function App() {
       }
 
       setSelectedIds([]);
-      setSelectedShapeId(null);
     }
   };
 
   const handleShapeClick = (e, shape) => {
+    // Ignore right-click - let context menu handler deal with it
+    if (e.evt?.button === 2) {
+      return;
+    }
+
     e.cancelBubble = true;
     const id = shape.id;
-    const isMultiSelect = e.evt.shiftKey || e.evt.ctrlKey || e.evt.metaKey;
+    const isMultiSelect = e.evt?.shiftKey || e.evt?.ctrlKey || e.evt?.metaKey;
 
     if (!isMultiSelect) {
       setSelectedIds([id]);
@@ -602,15 +807,19 @@ function App() {
         prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
       );
     }
-    setSelectedShapeId(id);
   };
 
   const handleDragStart = (e, shape) => {
+    // Ignore right-click
+    if (e.evt?.button === 2) {
+      return;
+    }
+
     const id = shape.id;
-    
+
     // Determine which shapes will be dragged
-    const shapesToDrag = selectedIds.includes(id) && selectedIds.length > 1 
-      ? selectedIds 
+    const shapesToDrag = selectedIds.includes(id) && selectedIds.length > 1
+      ? selectedIds
       : [id];
 
     // Store initial positions for all shapes that will be dragged
@@ -817,7 +1026,6 @@ function App() {
       });
     }
     setSelectedIds([]);
-    setSelectedShapeId(null);
   };
 
   const handlePrivateModeToggle = () => {
@@ -1035,49 +1243,49 @@ function App() {
         </>
       )}
 
-      {/* Shape Counter */}
-      <div className="shape-counter">
-        <span>{allShapes.length} shape{allShapes.length !== 1 ? 's' : ''}{privateShapes.length > 0 ? ` (${privateShapes.length} private)` : ''}</span>
-      </div>
+      {/* Bottom Bar - Shape Counter, Zoom Controls, Help Tooltip */}
+      <div className="bottom-bar">
+        <div className="shape-counter">
+          <span>{allShapes.length} shape{allShapes.length !== 1 ? 's' : ''}{privateShapes.length > 0 ? ` (${privateShapes.length} private)` : ''}</span>
+        </div>
 
-      {/* Zoom Controls */}
-      <div className="zoom-controls">
-        <button
-          className="zoom-button"
-          onClick={handleZoomOut}
-          title="Zoom out (Ctrl+-)"
-          disabled={stageScale <= MIN_ZOOM}
-        >
-          <ZoomOutIcon />
-        </button>
-        <button
-          className="zoom-level"
-          onClick={handleResetView}
-          title="Reset view (Ctrl+0)"
-        >
-          {Math.round(stageScale * 100)}%
-        </button>
-        <button
-          className="zoom-button"
-          onClick={handleZoomIn}
-          title="Zoom in (Ctrl++)"
-          disabled={stageScale >= MAX_ZOOM}
-        >
-          <ZoomInIcon />
-        </button>
-        <div className="zoom-divider"></div>
-        <button
-          className={`zoom-button pan-button ${isSpacePressed || isPanModeActive ? 'active' : ''}`}
-          onClick={() => setIsPanModeActive(!isPanModeActive)}
-          title={isPanModeActive ? "Exit pan mode (or hold Space)" : "Enter pan mode (or hold Space)"}
-        >
-          <HandIcon />
-        </button>
-      </div>
+        <div className="zoom-controls">
+          <button
+            className="zoom-button"
+            onClick={handleZoomOut}
+            title="Zoom out (Ctrl+-)"
+            disabled={stageScale <= MIN_ZOOM}
+          >
+            <ZoomOutIcon />
+          </button>
+          <button
+            className="zoom-level"
+            onClick={handleResetView}
+            title="Reset view (Ctrl+0)"
+          >
+            {Math.round(stageScale * 100)}%
+          </button>
+          <button
+            className="zoom-button"
+            onClick={handleZoomIn}
+            title="Zoom in (Ctrl++)"
+            disabled={stageScale >= MAX_ZOOM}
+          >
+            <ZoomInIcon />
+          </button>
+          <div className="zoom-divider"></div>
+          <button
+            className={`zoom-button pan-button ${isSpacePressed || isPanModeActive ? 'active' : ''}`}
+            onClick={() => setIsPanModeActive(!isPanModeActive)}
+            title={isPanModeActive ? "Exit pan mode (or hold Space)" : "Enter pan mode (or hold Space)"}
+          >
+            <HandIcon />
+          </button>
+        </div>
 
-      {/* Help Tooltip */}
-      <div className="help-tooltip">
-        <span>Click to add • Drag to move • Shift+Click multi-select • Scroll to zoom • Space+drag to pan</span>
+        <div className="help-tooltip">
+          <span>Click to add • Drag to move • Shift+Click multi-select • Right-click to delete • Scroll to zoom • Space+drag to pan</span>
+        </div>
       </div>
 
       {/* Private Mode Confirmation Modal */}
@@ -1120,6 +1328,7 @@ function App() {
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseUp}
+        onContextMenu={handleContextMenu}
         scaleX={stageScale}
         scaleY={stageScale}
         x={stagePos.x}
@@ -1129,6 +1338,19 @@ function App() {
       >
         <Layer>
           {allShapes.map(renderShape)}
+          {/* Marquee selection rectangle */}
+          {selectionRect && (
+            <Rect
+              x={selectionRect.x}
+              y={selectionRect.y}
+              width={selectionRect.width}
+              height={selectionRect.height}
+              fill="rgba(0, 150, 255, 0.1)"
+              stroke="#0096FF"
+              strokeWidth={1 / stageScale}
+              dash={[5 / stageScale, 5 / stageScale]}
+            />
+          )}
           <Transformer
             ref={transformerRef}
             resizeEnabled={false}
@@ -1174,31 +1396,24 @@ function App() {
         );
       })}
 
-      {/* Delete button for selected shape */}
-      {selectedShapeId && (() => {
-        const selectedShape = allShapes.find(s => s.id === selectedShapeId);
-        if (selectedShape) {
-          // Transform canvas coordinates to screen coordinates
-          const deleteButtonX = selectedShape.x * stageScale + stagePos.x + 50 * stageScale;
-          const deleteButtonY = selectedShape.y * stageScale + stagePos.y - 40;
-          return (
-            <button
-              className="shape-delete-button"
-              style={{
-                left: `${deleteButtonX}px`,
-                top: `${deleteButtonY}px`,
-              }}
-              onClick={() => {
-                handleDelete(selectedShapeId, selectedShape.isPrivate);
-                setSelectedShapeId(null);
-              }}
-              title="Delete shape"
-            >
-              ×
-            </button>
-          );
-        }
-      })()}
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          className="context-menu"
+          style={{
+            left: contextMenu.x,
+            top: contextMenu.y,
+          }}
+        >
+          <button
+            className="context-menu-item delete"
+            onClick={handleDeleteSelected}
+          >
+            <TrashIcon />
+            <span>Delete {selectedIds.length > 1 ? `(${selectedIds.length} shapes)` : 'shape'}</span>
+          </button>
+        </div>
+      )}
 
       {/* User Presence Panel */}
       <div className="user-presence-panel">
