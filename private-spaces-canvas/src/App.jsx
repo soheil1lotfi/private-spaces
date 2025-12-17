@@ -45,6 +45,36 @@ const UnlockIcon = () => (
   </svg>
 );
 
+// Zoom icons
+const ZoomInIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <circle cx="11" cy="11" r="8" />
+    <path d="M21 21l-4.35-4.35M11 8v6M8 11h6" />
+  </svg>
+);
+
+const ZoomOutIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <circle cx="11" cy="11" r="8" />
+    <path d="M21 21l-4.35-4.35M8 11h6" />
+  </svg>
+);
+
+const ResetViewIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+    <path d="M3 3v5h5" />
+  </svg>
+);
+
+const HandIcon = () => (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+    <path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2" />
+    <path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8" />
+    <path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15" />
+  </svg>
+);
+
 // Predefined color palette
 const colorPalette = [
   '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7',
@@ -73,6 +103,12 @@ const generateUserColor = () => {
 
 // localStorage key for private shapes
 const PRIVATE_SHAPES_KEY = 'private-spaces-private-shapes';
+
+// Zoom/Pan constants
+const ZOOM_SENSITIVITY = 1.1;
+const MIN_ZOOM = 0.1;
+const MAX_ZOOM = 5;
+const ZOOM_STEP = 0.25;
 
 // Helper to create a nested Y.Map for a shape (CRDT-friendly)
 const createYMapShape = (shapeData) => {
@@ -126,6 +162,15 @@ function App() {
   });
 
   const [selectedIds, setSelectedIds] = useState([]);
+
+  // Infinite canvas state
+  const [stagePos, setStagePos] = useState({ x: 0, y: 0 });
+  const [stageScale, setStageScale] = useState(1);
+  const [isPanning, setIsPanning] = useState(false);
+  const [isSpacePressed, setIsSpacePressed] = useState(false);
+  const [isPanModeActive, setIsPanModeActive] = useState(false); // Toggle pan mode from UI
+  const stageRef = useRef(null);
+
   const transformerRef = useRef(null);
   const shapeRefs = useRef({});
 
@@ -137,6 +182,10 @@ function App() {
   const selectedIdsRef = useRef(selectedIds);
   const shapesRef = useRef(shapes);
   const privateShapesRef = useRef(privateShapes);
+
+  // Refs for canvas transform (used in cursor sync)
+  const stagePosRef = useRef(stagePos);
+  const stageScaleRef = useRef(stageScale);
 
   // User identity - use useState with lazy init to ensure stable identity
   const [currentUser] = useState(() => ({
@@ -164,6 +213,14 @@ function App() {
   useEffect(() => {
     privateShapesRef.current = privateShapes;
   }, [privateShapes]);
+
+  useEffect(() => {
+    stagePosRef.current = stagePos;
+  }, [stagePos]);
+
+  useEffect(() => {
+    stageScaleRef.current = stageScale;
+  }, [stageScale]);
 
   // Window resize handler
   useEffect(() => {
@@ -284,12 +341,15 @@ function App() {
     awareness.on('change', updateAwareness);
     updateAwareness();
 
-    // Mouse move tracking
+    // Mouse move tracking - convert to canvas coordinates for sharing
     const handleMouseMove = (e) => {
       const localState = awareness.getLocalState();
+      // Convert screen coordinates to canvas coordinates
+      const canvasX = (e.clientX - stagePosRef.current.x) / stageScaleRef.current;
+      const canvasY = (e.clientY - stagePosRef.current.y) / stageScaleRef.current;
       awareness.setLocalState({
         ...localState,
-        cursor: { x: e.clientX, y: e.clientY },
+        cursor: { x: canvasX, y: canvasY },
       });
     };
 
@@ -322,9 +382,93 @@ function App() {
     setSelectedShapeId(null);
   }, []);
 
+  // Get canvas coordinates from screen coordinates (accounting for pan/zoom)
+  const getCanvasPoint = useCallback((screenX, screenY) => {
+    return {
+      x: (screenX - stagePos.x) / stageScale,
+      y: (screenY - stagePos.y) / stageScale,
+    };
+  }, [stagePos, stageScale]);
+
+  // Zoom handler for mouse wheel
+  const handleWheel = useCallback((e) => {
+    e.evt.preventDefault();
+
+    const stage = stageRef.current;
+    if (!stage) return;
+
+    const oldScale = stageScale;
+    const pointer = stage.getPointerPosition();
+
+    // Calculate pointer position relative to canvas
+    const mousePointTo = {
+      x: (pointer.x - stagePos.x) / oldScale,
+      y: (pointer.y - stagePos.y) / oldScale,
+    };
+
+    // Determine zoom direction
+    const direction = e.evt.deltaY > 0 ? -1 : 1;
+    const newScale = direction > 0
+      ? oldScale * ZOOM_SENSITIVITY
+      : oldScale / ZOOM_SENSITIVITY;
+
+    // Clamp zoom level
+    const clampedScale = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, newScale));
+
+    // Calculate new position to zoom towards cursor
+    const newPos = {
+      x: pointer.x - mousePointTo.x * clampedScale,
+      y: pointer.y - mousePointTo.y * clampedScale,
+    };
+
+    setStageScale(clampedScale);
+    setStagePos(newPos);
+  }, [stageScale, stagePos]);
+
+  // Zoom control functions
+  const handleZoomIn = useCallback(() => {
+    const newScale = Math.min(MAX_ZOOM, stageScale + ZOOM_STEP);
+    const centerX = windowSize.width / 2;
+    const centerY = windowSize.height / 2;
+
+    const mousePointTo = {
+      x: (centerX - stagePos.x) / stageScale,
+      y: (centerY - stagePos.y) / stageScale,
+    };
+
+    setStageScale(newScale);
+    setStagePos({
+      x: centerX - mousePointTo.x * newScale,
+      y: centerY - mousePointTo.y * newScale,
+    });
+  }, [stageScale, stagePos, windowSize]);
+
+  const handleZoomOut = useCallback(() => {
+    const newScale = Math.max(MIN_ZOOM, stageScale - ZOOM_STEP);
+    const centerX = windowSize.width / 2;
+    const centerY = windowSize.height / 2;
+
+    const mousePointTo = {
+      x: (centerX - stagePos.x) / stageScale,
+      y: (centerY - stagePos.y) / stageScale,
+    };
+
+    setStageScale(newScale);
+    setStagePos({
+      x: centerX - mousePointTo.x * newScale,
+      y: centerY - mousePointTo.y * newScale,
+    });
+  }, [stageScale, stagePos, windowSize]);
+
+  const handleResetView = useCallback(() => {
+    setStageScale(1);
+    setStagePos({ x: 0, y: 0 });
+  }, []);
+
   // Keyboard shortcuts - using refs to avoid recreation
   useEffect(() => {
     const handleKeyDown = (e) => {
+      // Delete shapes
       if ((e.key === 'Delete' || e.key === 'Backspace') && selectedIdsRef.current.length > 0) {
         e.preventDefault();
         const allShapesCurrent = [...shapesRef.current, ...privateShapesRef.current];
@@ -335,13 +479,81 @@ function App() {
           }
         });
       }
+
+      // Space key for panning mode
+      if (e.code === 'Space' && !e.repeat) {
+        e.preventDefault();
+        setIsSpacePressed(true);
+      }
+
+      // Zoom shortcuts: Ctrl/Cmd + Plus/Minus/0
+      if (e.ctrlKey || e.metaKey) {
+        if (e.key === '=' || e.key === '+') {
+          e.preventDefault();
+          handleZoomIn();
+        } else if (e.key === '-') {
+          e.preventDefault();
+          handleZoomOut();
+        } else if (e.key === '0') {
+          e.preventDefault();
+          handleResetView();
+        }
+      }
+
+      // Escape to exit pan mode
+      if (e.key === 'Escape') {
+        setIsPanModeActive(false);
+      }
+    };
+
+    const handleKeyUp = (e) => {
+      if (e.code === 'Space') {
+        setIsSpacePressed(false);
+        setIsPanning(false);
+      }
     };
 
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [handleDelete]); // Only depends on handleDelete which is memoized
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [handleDelete, handleZoomIn, handleZoomOut, handleResetView]);
+
+  // Pan start handler
+  const handleMouseDown = (e) => {
+    // Middle mouse button, space+left click, or pan mode active + left click
+    if (e.evt.button === 1 || ((isSpacePressed || isPanModeActive) && e.evt.button === 0)) {
+      e.evt.preventDefault();
+      setIsPanning(true);
+    }
+  };
+
+  // Pan move handler
+  const handleMouseMove = (e) => {
+    if (isPanning) {
+      const stage = stageRef.current;
+      if (!stage) return;
+
+      setStagePos({
+        x: stagePos.x + e.evt.movementX,
+        y: stagePos.y + e.evt.movementY,
+      });
+    }
+  };
+
+  // Pan end handler
+  const handleMouseUp = () => {
+    if (isPanning) {
+      setIsPanning(false);
+    }
+  };
 
   const handleClick = (e) => {
+    // Don't create shapes while panning or in pan mode
+    if (isPanning || isSpacePressed || isPanModeActive) return;
+
     if (e.target === e.target.getStage()) {
       if (selectedIds.length > 0) {
         setSelectedIds([]);
@@ -350,10 +562,13 @@ function App() {
       const stage = e.target.getStage();
       const pointerPosition = stage.getPointerPosition();
 
+      // Convert screen coordinates to canvas coordinates (accounting for pan/zoom)
+      const canvasPoint = getCanvasPoint(pointerPosition.x, pointerPosition.y);
+
       const newShapeData = {
         id: uuidv4(),
-        x: pointerPosition.x,
-        y: pointerPosition.y,
+        x: canvasPoint.x,
+        y: canvasPoint.y,
         type: selectedTool,
         fill: selectedColor,
         isPrivate: isPrivateMode,
@@ -369,7 +584,7 @@ function App() {
           shapesMapRef.current.set(newShapeData.id, yShape);
         });
       }
-      
+
       setSelectedIds([]);
       setSelectedShapeId(null);
     }
@@ -825,9 +1040,44 @@ function App() {
         <span>{allShapes.length} shape{allShapes.length !== 1 ? 's' : ''}{privateShapes.length > 0 ? ` (${privateShapes.length} private)` : ''}</span>
       </div>
 
+      {/* Zoom Controls */}
+      <div className="zoom-controls">
+        <button
+          className="zoom-button"
+          onClick={handleZoomOut}
+          title="Zoom out (Ctrl+-)"
+          disabled={stageScale <= MIN_ZOOM}
+        >
+          <ZoomOutIcon />
+        </button>
+        <button
+          className="zoom-level"
+          onClick={handleResetView}
+          title="Reset view (Ctrl+0)"
+        >
+          {Math.round(stageScale * 100)}%
+        </button>
+        <button
+          className="zoom-button"
+          onClick={handleZoomIn}
+          title="Zoom in (Ctrl++)"
+          disabled={stageScale >= MAX_ZOOM}
+        >
+          <ZoomInIcon />
+        </button>
+        <div className="zoom-divider"></div>
+        <button
+          className={`zoom-button pan-button ${isSpacePressed || isPanModeActive ? 'active' : ''}`}
+          onClick={() => setIsPanModeActive(!isPanModeActive)}
+          title={isPanModeActive ? "Exit pan mode (or hold Space)" : "Enter pan mode (or hold Space)"}
+        >
+          <HandIcon />
+        </button>
+      </div>
+
       {/* Help Tooltip */}
       <div className="help-tooltip">
-        <span>Click to add • Drag to move • Shift+Click for multi-select • Delete to remove</span>
+        <span>Click to add • Drag to move • Shift+Click multi-select • Scroll to zoom • Space+drag to pan</span>
       </div>
 
       {/* Private Mode Confirmation Modal */}
@@ -859,12 +1109,23 @@ function App() {
         </div>
       )}
 
-      {/* Canvas - now responsive */}
+      {/* Canvas - Infinite canvas with pan/zoom */}
       <Stage
+        ref={stageRef}
         width={windowSize.width}
         height={windowSize.height}
         onClick={handleClick}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        scaleX={stageScale}
+        scaleY={stageScale}
+        x={stagePos.x}
+        y={stagePos.y}
         className="canvas"
+        style={{ cursor: isSpacePressed || isPanning || isPanModeActive ? (isPanning ? 'grabbing' : 'grab') : 'crosshair' }}
       >
         <Layer>
           {allShapes.map(renderShape)}
@@ -882,17 +1143,21 @@ function App() {
         </Layer>
       </Stage>
 
-      {/* Other users' cursors */}
+      {/* Other users' cursors - transform from canvas coords to screen coords */}
       {Object.values(cursors).map(cursor => {
         if (cursor.id === currentUser.id) return null;
-        
+
+        // Convert canvas coordinates to screen coordinates
+        const screenX = cursor.x * stageScale + stagePos.x;
+        const screenY = cursor.y * stageScale + stagePos.y;
+
         return (
           <div
             key={cursor.id}
             className="user-cursor"
             style={{
-              left: cursor.x,
-              top: cursor.y,
+              left: screenX,
+              top: screenY,
               '--cursor-color': cursor.color,
             }}
           >
@@ -913,8 +1178,9 @@ function App() {
       {selectedShapeId && (() => {
         const selectedShape = allShapes.find(s => s.id === selectedShapeId);
         if (selectedShape) {
-          const deleteButtonX = selectedShape.x + 50;
-          const deleteButtonY = selectedShape.y - 40;
+          // Transform canvas coordinates to screen coordinates
+          const deleteButtonX = selectedShape.x * stageScale + stagePos.x + 50 * stageScale;
+          const deleteButtonY = selectedShape.y * stageScale + stagePos.y - 40;
           return (
             <button
               className="shape-delete-button"

@@ -283,7 +283,7 @@ body {
 /* Shape Counter */
 .shape-counter {
   position: fixed;
-  bottom: 16px;
+  bottom: 60px;
   left: 16px;
   z-index: 100;
   padding: 6px 12px;
@@ -297,7 +297,7 @@ body {
 /* Help Tooltip */
 .help-tooltip {
   position: fixed;
-  bottom: 16px;
+  bottom: 60px;
   right: 16px;
   z-index: 100;
   padding: 6px 12px;
@@ -592,4 +592,119 @@ body {
 .user-label.private {
   color: #c62828;
   font-weight: 600;
+}
+
+/* Zoom Controls */
+.zoom-controls {
+  position: fixed;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #ffffff;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid #e0e0e0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.zoom-button {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  background: #f5f5f5;
+  color: #666;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.zoom-button:hover:not(:disabled) {
+  background: #e8e8e8;
+  color: #333;
+}
+
+.zoom-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.zoom-button.active {
+  background: #333;
+  color: white;
+  border-color: #333;
+}
+
+.zoom-level {
+  min-width: 54px;
+  height: 32px;
+  padding: 0 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  background: #fff;
+  color: #333;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.zoom-level:hover {
+  background: #f5f5f5;
+}
+
+.zoom-divider {
+  width: 1px;
+  height: 20px;
+  background: #e0e0e0;
+  margin: 0 4px;
+}
+
+.pan-button {
+  position: relative;
+}
+
+/* Canvas cursor styles */
+.canvas-panning {
+  cursor: grab !important;
+}
+
+.canvas-panning:active {
+  cursor: grabbing !important;
+}
+
+/* Infinite canvas grid background (optional visual guide) */
+.canvas-grid {
+  background-image:
+    linear-gradient(to right, #f0f0f0 1px, transparent 1px),
+    linear-gradient(to bottom, #f0f0f0 1px, transparent 1px);
+  background-size: 50px 50px;
+}
+
+/* Responsive zoom controls */
+@media (max-width: 768px) {
+  .zoom-controls {
+    padding: 4px 8px;
+    gap: 2px;
+  }
+
+  .zoom-button {
+    width: 28px;
+    height: 28px;
+  }
+
+  .zoom-level {
+    min-width: 44px;
+    height: 28px;
+    font-size: 11px;
+  }
 }
