@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const http = require("http");
@@ -11,8 +12,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const dbURI =
-  "mongodb+srv://soheil1lotfi:soloLotfi@cscw.93kngev.mongodb.net/?appName=CSCW";
+const dbURI = process.env.MONGO_URI;
 const server = http.createServer(app);
 
 // Connect to MongoDB
